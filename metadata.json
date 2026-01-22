@@ -1,0 +1,8 @@
+
+{
+  "name": "SalesPro Toolkit",
+  "description": "A comprehensive enterprise product toolkit and sales enablement platform featuring knowledge repositories, AI assistance, and competitive intelligence.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
