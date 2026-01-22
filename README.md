@@ -1,11 +1,4 @@
+SalesPro Toolkit is a full-stack internal web application designed to streamline workflows for sales teams, product managers, and cross-functional departments within an organization. The platform provides role-based access control, admin-managed users, and module-level permissions, enabling secure and scalable internal operations.
 
-## Run Locally
+This project is built using React, Node.js, Tailwind CSS, and SQL Server, following industry-standard best practices for authentication, authorization, and modular application design.
 
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
