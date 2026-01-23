@@ -2,7 +2,7 @@
   "name": "salespro-toolkit",
   "private": true,
   "version": "0.1.1",
-  "author": "User",
+  "author": "Ann Sony",
   "description": "SalesPro Toolkit Application",
   "type": "module",
   "main": "electron/main.js",
