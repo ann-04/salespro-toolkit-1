@@ -27,7 +27,10 @@ interface AdminPanelProps {
 }
 
 const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
-  const [activeTab, setActiveTab] = useState<'overview' | 'products' | 'users' | 'org' | 'categories' | 'audit'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'products' | 'users' | 'org' | 'categories' | 'audit' | 'system' | 'assetPerms'>('overview');
+
+  // System Config State
+  const [systemConfig, setSystemConfig] = useState({ apiKey: '', modelName: '' });
   // ...
 
   // Helper for Permissions
@@ -141,6 +144,68 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
 
   // Org State
   const [newRole, setNewRole] = useState('');
+
+  // --- VERSION ASSIGNMENT STATE ---
+  const [assignUser, setAssignUser] = useState<AdminUser | null>(null);
+  const [userAssignments, setUserAssignments] = useState<any[]>([]);
+  const [assetSearchQuery, setAssetSearchQuery] = useState('');
+  const [assetResults, setAssetResults] = useState<any[]>([]);
+  const [selectedAssetVersions, setSelectedAssetVersions] = useState<any[]>([]);
+  const [selectedVersionGroupId, setSelectedVersionGroupId] = useState<string | null>(null);
+
+  const openAssignModal = async (u: AdminUser) => {
+    setAssignUser(u);
+    setAssetSearchQuery('');
+    setAssetResults([]);
+    setSelectedAssetVersions([]);
+    setSelectedVersionGroupId(null);
+    try {
+      const assignments = await DataService.getUserFileAssignments(u.id);
+      setUserAssignments(assignments);
+    } catch (error) {
+      console.error('Failed to load assignments', error);
+      alert('Failed to load existing assignments');
+    }
+  };
+
+  const handleAssetSearch = async (q: string) => {
+    setAssetSearchQuery(q);
+    if (q.length < 2) {
+      setAssetResults([]);
+      return;
+    }
+    try {
+      const results = await DataService.searchAssets(q);
+      setAssetResults(results);
+    } catch (error) {
+      console.error('Search failed', error);
+    }
+  };
+
+  const handleSelectAssetForVersion = async (latestId: number, versionGroupId: string) => {
+    try {
+      setSelectedVersionGroupId(versionGroupId);
+      const versions = await DataService.getFileVersionsById(latestId);
+      setSelectedAssetVersions(versions);
+    } catch (error) {
+      console.error('Failed to fetch versions', error);
+    }
+  };
+
+  const handleAssignVersion = async (assetFileId: number, versionGroupId: string) => {
+    if (!assignUser) return;
+    try {
+      // If assetFileId is -1 (or handling removal), logic needs to support it. 
+      // The button will pass -1 for revert.
+      await DataService.assignUserFileVersion(assignUser.id, assetFileId === -1 ? null : assetFileId, versionGroupId);
+      const assignments = await DataService.getUserFileAssignments(assignUser.id);
+      setUserAssignments(assignments);
+      alert('Assignment updated successfully');
+    } catch (error) {
+      console.error('Assign error details:', error);
+      alert('Failed to update assignment');
+    }
+  };
   const [newBu, setNewBu] = useState('');
   const [manageRoleId, setManageRoleId] = useState<number | null>(null);
   const [manageBuId, setManageBuId] = useState<number | null>(null);
@@ -152,6 +217,11 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
   const [manageCategoryId, setManageCategoryId] = useState<number | null>(null);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
+
+  // Asset Permissions State
+  const [allAssetPermissions, setAllAssetPermissions] = useState<any[]>([]);
+  const [managingAssetUser, setManagingAssetUser] = useState<AdminUser | null>(null);
+  const [selectedAssetPermIds, setSelectedAssetPermIds] = useState<Set<number>>(new Set());
 
   const fetchAuditLogs = async () => {
     try {
@@ -176,8 +246,93 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
       fetchCategories();
     } else if (activeTab === 'audit') {
       fetchAuditLogs();
+    } else if (activeTab === 'system') {
+      fetchSystemConfig();
+    } else if (activeTab === 'assetPerms') {
+      fetchDataForUsers();
+      fetchAssetPermissions();
     }
   }, [activeTab]);
+
+  const fetchAssetPermissions = async () => {
+    try {
+      const res = await fetch(`${API_URL}/assets/admin/asset-permissions`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAllAssetPermissions(data);
+      }
+    } catch (err) { console.error('Failed to load asset permissions', err); }
+  };
+
+  const openAssetPermissionModal = async (user: AdminUser) => {
+    try {
+      const res = await fetch(`${API_URL}/assets/admin/users/${user.id}/asset-permissions`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      if (res.ok) {
+        const userPerms = await res.json();
+        setSelectedAssetPermIds(new Set(userPerms.map((p: any) => p.Id)));
+        setManagingAssetUser(user);
+      }
+    } catch (err: any) { alert('Failed to load user asset permissions: ' + err.message); }
+  };
+
+  const saveAssetPermissions = async () => {
+    if (!managingAssetUser) return;
+    try {
+      const res = await fetch(`${API_URL}/assets/admin/users/${managingAssetUser.id}/asset-permissions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({ permissionIds: Array.from(selectedAssetPermIds) })
+      });
+      if (res.ok) {
+        setManagingAssetUser(null);
+        alert('Asset permissions updated successfully');
+      } else {
+        alert('Failed to save asset permissions');
+      }
+    } catch (err) { alert('Error saving asset permissions'); }
+  };
+
+  const fetchSystemConfig = async () => {
+    try {
+      const res = await fetch(`${API_URL}/admin/system-settings`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSystemConfig({
+          apiKey: data.GEMINI_API_KEY || '',
+          modelName: data.GEMINI_MODEL || ''
+        });
+      }
+    } catch (err) { console.error('Failed to load system settings', err); }
+  };
+
+  const saveSystemConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await fetch(`${API_URL}/admin/system-settings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify(systemConfig)
+      });
+      if (res.ok) {
+        alert('System Configuration Updated');
+        fetchSystemConfig();
+      } else {
+        alert('Failed to update configuration');
+      }
+    } catch (err) { alert('Error updating configuration'); }
+  };
 
   const addRole = async () => {
     if (!newRole) return;
@@ -383,6 +538,16 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
               Audit Logs
             </button>
           )}
+
+          {(user?.role === 'Admin' || user?.roleName === 'Admin') && (
+            <button
+              onClick={() => setActiveTab('assetPerms')}
+              className={`px-4 py-2 rounded-md text-sm font-medium transition ${activeTab === 'assetPerms' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              Asset Permissions
+            </button>
+          )}
+
         </div>
       </header>
 
@@ -519,6 +684,14 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
                     </div>
 
                     <div className="flex space-x-2 opacity-0 group-hover:opacity-100 transition-opacity ml-4">
+                      {u.userType === 'PARTNER' && (
+                        <button
+                          onClick={() => openAssignModal(u)}
+                          className="px-3 py-1 text-xs font-bold text-amber-600 bg-amber-50 rounded hover:bg-amber-100 transition"
+                        >
+                          Manage Files
+                        </button>
+                      )}
                       <button
                         onClick={() => setEditingUser(u)}
                         className="px-3 py-1 text-xs font-bold text-indigo-600 bg-indigo-50 rounded hover:bg-indigo-100 transition"
@@ -635,6 +808,90 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
                     >
                       Save Info
                     </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Version Assignment Modal */}
+            {assignUser && (
+              <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+                <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
+                  <div className="flex justify-between items-center mb-6">
+                    <h3 className="text-xl font-bold">Manage File Versions for {assignUser.name}</h3>
+                    <button onClick={() => setAssignUser(null)} className="text-gray-500 hover:text-gray-700">✕</button>
+                  </div>
+
+                  <div className="mb-8">
+                    <h4 className="font-bold text-sm text-slate-700 mb-2 uppercase tracking-wide">Currently Pinned Versions</h4>
+                    <div className="bg-slate-50 border rounded-lg p-4 space-y-2">
+                      {userAssignments.length === 0 ? <p className="text-sm text-slate-500">No specific versions pinned (User sees Latest).</p> :
+                        userAssignments.map(ua => (
+                          <div key={ua.Id} className="flex justify-between items-center bg-white border p-3 rounded shadow-sm">
+                            <div>
+                              <p className="font-bold text-slate-800">{ua.Title}</p>
+                              <p className="text-xs text-slate-500">Pinned Version: <span className="font-mono font-bold text-blue-600">V{ua.VersionNumber}</span> (Latest: V{ua.latestVersion})</p>
+                            </div>
+                            <button
+                              onClick={() => handleAssignVersion(-1, ua.VersionGroupId)}
+                              className="text-xs text-red-600 hover:text-red-800 font-bold border border-red-200 bg-red-50 px-2 py-1 rounded"
+                            >
+                              Revert to Latest
+                            </button>
+                          </div>
+                        ))
+                      }
+                    </div>
+                  </div>
+
+                  <div className="border-t pt-6">
+                    <h4 className="font-bold text-sm text-slate-700 mb-2 uppercase tracking-wide">Assign New Version</h4>
+                    <div className="flex gap-2 mb-4">
+                      <input
+                        type="text"
+                        placeholder="Search assets by title..."
+                        className="flex-1 border rounded px-3 py-2"
+                        value={assetSearchQuery}
+                        onChange={e => handleAssetSearch(e.target.value)}
+                      />
+                    </div>
+
+                    {assetResults.length > 0 && (
+                      <div className="mb-4 max-h-40 overflow-y-auto border rounded bg-white">
+                        {assetResults.map(ar => (
+                          <div
+                            key={ar.versionGroupId}
+                            className={`p-2 hover:bg-blue-50 cursor-pointer border-b ${selectedVersionGroupId === ar.versionGroupId ? 'bg-blue-50 border-l-4 border-l-blue-600' : ''}`}
+                            onClick={() => handleSelectAssetForVersion(ar.latestId, ar.versionGroupId)}
+                          >
+                            <p className="font-bold text-sm">{ar.title}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {selectedVersionGroupId && selectedAssetVersions.length > 0 && (
+                      <div className="bg-blue-50 p-4 rounded-lg border border-blue-100">
+                        <h5 className="font-bold text-blue-900 mb-3">Select Version to Pin</h5>
+                        <div className="space-y-2 max-h-60 overflow-y-auto">
+                          {selectedAssetVersions.map(v => (
+                            <div key={v.id} className="flex justify-between items-center p-2 bg-white rounded border border-blue-200">
+                              <div>
+                                <span className="font-bold text-slate-700">V{v.versionNumber}</span>
+                                <span className="text-xs text-slate-500 ml-2">Created {new Date(v.createdAt).toLocaleDateString()}</span>
+                                {v.isArchived && <span className="ml-2 text-[10px] bg-gray-200 px-1 rounded">Archived</span>}
+                              </div>
+                              <button
+                                onClick={() => handleAssignVersion(v.id, v.versionGroupId || selectedVersionGroupId)}
+                                className="px-3 py-1 bg-blue-600 text-white text-xs font-bold rounded hover:bg-blue-700"
+                              >
+                                Pin This
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -935,6 +1192,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
         )
       }
 
+
       {
         isAddUserOpen && (
           <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
@@ -1106,6 +1364,107 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
           </div>
         )
       }
+
+      {/* Asset Permissions Tab */}
+      {activeTab === 'assetPerms' && (
+        <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="p-6 border-b border-slate-200">
+            <h3 className="text-xl font-bold">Asset Permissions Management</h3>
+            <p className="text-sm text-slate-500 mt-1">
+              Manage user permissions for creating, updating, and deleting assets. All users can view assets by default.
+            </p>
+          </div>
+
+          {loading ? (
+            <div className="p-12 text-center text-slate-500">Loading users...</div>
+          ) : (
+            <div className="space-y-3 mb-6 p-6">
+              {users.map(u => (
+                <div key={u.id} className="flex items-center justify-between p-4 bg-slate-50 border border-slate-100 rounded-lg group hover:border-blue-200 transition bg-white shadow-sm">
+                  <div className="flex-1">
+                    <p className="font-bold text-slate-900">{u.name}</p>
+                    <p className="text-xs text-slate-500">{u.email}</p>
+                    <div className="mt-1 text-xs text-slate-600">
+                      {u.roleName || 'No Role'} • {u.buName || 'No Dept'}
+                    </div>
+                  </div>
+
+                  <div className="flex space-x-2 opacity-0 group-hover:opacity-100 transition-opacity ml-4">
+                    <button
+                      onClick={() => openAssetPermissionModal(u)}
+                      className="px-3 py-1 text-xs font-bold text-teal-600 bg-teal-50 rounded hover:bg-teal-100 transition"
+                    >
+                      Manage Asset Permissions
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {users.length === 0 && <p className="text-slate-500 italic p-4">No users found.</p>}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Asset Permission Modal */}
+      {managingAssetUser && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
+            <h3 className="text-xl font-bold mb-2">Manage Asset Permissions: {managingAssetUser.name}</h3>
+            <p className="text-sm text-slate-500 mb-4">
+              Select which asset operations this user can perform. View access is granted to all users by default.
+            </p>
+
+            <div className="space-y-6">
+              {Object.entries(allAssetPermissions
+                .filter(p => p.Action !== 'READ') // Exclude READ since all users can view
+                .reduce((acc: any, p) => {
+                  if (!acc[p.ResourceType]) acc[p.ResourceType] = [];
+                  acc[p.ResourceType].push(p);
+                  return acc;
+                }, {})).map(([resourceType, perms]: [string, any]) => (
+                  <div key={resourceType} className="border border-slate-200 rounded-lg p-4 bg-slate-50">
+                    <h4 className="font-bold text-slate-700 mb-3 border-b border-slate-200 pb-2">
+                      {resourceType.replace('_', ' ')}
+                    </h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      {perms.map((p: any) => (
+                        <label key={p.Id} className="flex items-center space-x-2 cursor-pointer hover:bg-slate-100 p-2 rounded">
+                          <input
+                            type="checkbox"
+                            checked={selectedAssetPermIds.has(p.Id)}
+                            onChange={e => {
+                              const newSet = new Set(selectedAssetPermIds);
+                              if (e.target.checked) newSet.add(p.Id);
+                              else newSet.delete(p.Id);
+                              setSelectedAssetPermIds(newSet);
+                            }}
+                            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span className="text-sm text-slate-700">{p.Action}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+            </div>
+
+            <div className="flex justify-end space-x-3 mt-6 border-t pt-4">
+              <button
+                onClick={() => setManagingAssetUser(null)}
+                className="px-4 py-2 border border-slate-200 rounded-lg text-slate-700 hover:bg-slate-50 transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveAssetPermissions}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-bold"
+              >
+                Save Permissions
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div >
   );
 };

@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, ipcMain, dialog } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
 import { fork } from "child_process";
@@ -25,7 +25,8 @@ function createWindow() {
   }
   mainWindow.on("closed", () => (mainWindow = null));
 }
-import { autoUpdater } from "electron-updater";
+import pkg from 'electron-updater';
+const { autoUpdater } = pkg;
 
 function startServer() {
   const serverPath = path.join(__dirname, "../server/index.js");
@@ -39,6 +40,30 @@ function startServer() {
     console.error("Server process failed:", err);
   });
 }
+
+// IPC Handlers for File Selection
+ipcMain.handle('dialog:openFile', async (event, options) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'Documents', extensions: ['pdf', 'xlsx', 'xls', 'doc', 'docx', 'ppt', 'pptx', 'txt', 'csv'] },
+      { name: 'PDF Files', extensions: ['pdf'] },
+      { name: 'Excel Files', extensions: ['xlsx', 'xls'] },
+      { name: 'All Files', extensions: ['*'] }
+    ],
+    ...options
+  });
+  return result;
+});
+
+ipcMain.handle('dialog:openFolder', async (event, options) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    ...options
+  });
+  return result;
+});
+
 app.on("ready", () => {
   startServer();
   createWindow();

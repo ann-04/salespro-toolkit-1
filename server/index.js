@@ -1,45 +1,85 @@
 import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { connectToDatabase, sql } from './db.js';
 import { logAudit } from './audit.js';
-import { GoogleGenAI } from '@google/genai';
+import { generateContent } from './services/geminiService.js';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import multer from 'multer';
+import fs from 'fs';
+import {
+    ensureStorageDirectory,
+    getFileType,
+    generateStoredFileName,
+    getStoragePath,
+    extractPdfText,
+    extractExcelMetadata,
+    getFileSize,
+    copyFileToStorage,
+    deleteFileFromStorage,
+    isValidFileType,
+    getAllFilesFromFolder
+} from './fileService.js';
+import salesAssetsRoutes from './salesAssetsRoutes.js';
+import {
+    authenticateToken,
+    createToken,
+    securityHeaders,
+    errorHandler,
+    requirePermission,
+    requireRole
+} from './middleware/security.js';
+import {
+    isValidEmail,
+    isValidPassword,
+    isValidLength,
+    isValidUserType,
+    isValidPartnerCategory,
+    isValidId,
+    sanitizeString,
+    getPasswordStrengthMessage
+} from './utils/validation.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-dotenv.config({ path: path.resolve(__dirname, '../.env.local') });
+const isProd = process.env.NODE_ENV === 'production' || process.resourcesPath;
+const envPath = isProd
+    ? path.join(process.resourcesPath, '.env.local')
+    : path.resolve(__dirname, '../.env.local');
+
+dotenv.config({ path: envPath });
 
 const app = express();
 const PORT = 3000;
-const JWT_SECRET = 'super-secret-key-change-in-production'; // In real app, use .env
 
-app.use(cors());
+// CORS Configuration - restrict to allowed origins
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173'];
+app.use(cors({
+    origin: (origin, callback) => {
+        // Allow requests with no origin (mobile apps, Postman, etc.)
+        if (!origin) return callback(null, true);
+
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true
+}));
+
 app.use(express.json());
+app.use(securityHeaders);
+
+// Sales Assets Routes
+app.use('/api/assets', salesAssetsRoutes);
 
 // --- MIDDLEWARE ---
-const authenticateToken = (req, res, next) => {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) {
-        // Allow admin approve/register to proceed without token if needed, 
-        // BUT implemented routes dictate admin action needs auth.
-        // For now, standard implementation.
-        return res.status(401).json({ error: 'No token provided' });
-    }
-
-    try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        req.user = decoded;
-        next();
-    } catch (err) {
-        return res.status(403).json({ error: 'Invalid token' });
-    }
-};
+// authenticateToken is now imported from security middleware
 
 // --- Mock Email Service ---
 const sendCredentialsEmail = async (email, password) => {
@@ -92,6 +132,23 @@ app.get('/', (req, res) => {
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { name, email, roleId, buId, userType } = req.body;
+
+        // Input validation
+        if (!isValidEmail(email)) {
+            return res.status(400).json({ error: 'Invalid email format' });
+        }
+
+        if (!isValidLength(name, 2, 100)) {
+            return res.status(400).json({ error: 'Name must be between 2 and 100 characters' });
+        }
+
+        const sanitizedName = sanitizeString(name);
+        const sanitizedUserType = userType?.toUpperCase() || 'INTERNAL';
+
+        if (!isValidUserType(sanitizedUserType)) {
+            return res.status(400).json({ error: 'Invalid user type. Must be INTERNAL or PARTNER' });
+        }
+
         const pool = await connectToDatabase();
 
         // Check if email exists
@@ -104,30 +161,36 @@ app.post('/api/auth/register', async (req, res) => {
         }
 
         await pool.request()
-            .input('Name', sql.NVarChar, name)
+            .input('Name', sql.NVarChar, sanitizedName)
             .input('Email', sql.NVarChar, email)
             .input('RoleId', sql.Int, roleId || null)
             .input('BusinessUnitId', sql.Int, buId || null)
-            .input('UserType', sql.NVarChar, userType || 'INTERNAL')
+            .input('UserType', sql.NVarChar, sanitizedUserType)
             .query(`
                 INSERT INTO Users (Name, Email, Status, MustChangePassword, UserType)
                 VALUES (@Name, @Email, 'PENDING', 1, @UserType)
             `);
 
         await sendRequestReceivedEmail(email);
-        await logAudit(pool, null, 'REGISTER', 'User', email, { name, email, roleId, buId, userType });
+        await logAudit(pool, null, 'REGISTER', 'User', email, { name: sanitizedName, email, roleId, buId, userType: sanitizedUserType });
         res.status(201).json({ message: 'Registration successful. Waiting for Admin approval.' });
 
     } catch (err) {
         console.error('Register Error:', err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Registration failed' });
     }
 });
 
 // 2. ADMIN APPROVE (Generates password, Emails user)
-app.post('/api/admin/users/:id/approve', authenticateToken, async (req, res) => {
+app.post('/api/admin/users/:id/approve', authenticateToken, requirePermission('USERS_MANAGE'), async (req, res) => {
     try {
         const { id } = req.params;
+
+        // Validate ID parameter
+        if (!isValidInteger(id)) {
+            return res.status(400).json({ error: 'Invalid user ID' });
+        }
+
         const pool = await connectToDatabase();
 
         // Generate Random Password
@@ -159,15 +222,38 @@ app.post('/api/admin/users/:id/approve', authenticateToken, async (req, res) => 
 
     } catch (err) {
         console.error('Approve Error:', err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to approve user' });
     }
 });
 
 // 3. ADMIN UPDATE USER (Role, BU, PartnerCategory, UserType)
-app.put('/api/admin/users/:id', authenticateToken, async (req, res) => {
+app.put('/api/admin/users/:id', authenticateToken, requirePermission('USERS_MANAGE'), async (req, res) => {
     try {
         const { id } = req.params;
         const { roleId, buId, partnerCategory, userType } = req.body;
+
+        // Validate ID parameter
+        if (!isValidInteger(id)) {
+            return res.status(400).json({ error: 'Invalid user ID' });
+        }
+
+        // Validate inputs if provided
+        if (roleId !== undefined && roleId !== null && !isValidInteger(roleId)) {
+            return res.status(400).json({ error: 'Invalid role ID' });
+        }
+
+        if (buId !== undefined && buId !== null && !isValidInteger(buId)) {
+            return res.status(400).json({ error: 'Invalid business unit ID' });
+        }
+
+        if (userType !== undefined && !isValidUserType(userType)) {
+            return res.status(400).json({ error: 'Invalid user type. Must be INTERNAL or PARTNER' });
+        }
+
+        if (partnerCategory !== undefined && partnerCategory !== null && !isValidPartnerCategory(partnerCategory)) {
+            return res.status(400).json({ error: 'Invalid partner category. Must be Bronze, Silver, or Gold' });
+        }
+
         const pool = await connectToDatabase();
 
         await pool.request()
@@ -186,12 +272,12 @@ app.put('/api/admin/users/:id', authenticateToken, async (req, res) => {
         res.json({ message: 'User updated successfully' });
     } catch (err) {
         console.error('Update User Error:', err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to update user' });
     }
 });
 
 // GET ALL USERS (For Admin Dashboard)
-app.get('/api/admin/users', async (req, res) => {
+app.get('/api/admin/users', authenticateToken, requirePermission('USERS_VIEW'), async (req, res) => {
     try {
         const pool = await connectToDatabase();
         const result = await pool.request().query(`
@@ -220,8 +306,8 @@ app.get('/api/admin/users', async (req, res) => {
 
         res.json(users);
     } catch (err) {
-        console.error('Fetch Users Error:', err);
-        res.status(500).json({ error: err.message });
+        console.error('Get Users Error:', err);
+        res.status(500).json({ error: 'Failed to fetch users' });
     }
 });
 
@@ -269,17 +355,17 @@ app.post('/api/auth/login', async (req, res) => {
 
         const permissions = permResult.recordset.map(row => `${row.Module.toUpperCase()}_${row.Action}`);
 
-        // Generate Token
-        // Include userType and partnerCategory
-        const token = jwt.sign({
+        // Generate Token with secure configuration
+        const token = createToken({
             id: user.Id,
+            email: user.Email,
             role: user.RoleName,
             buId: user.BusinessUnitId,
             userType: user.UserType || 'INTERNAL',
             partnerCategory: user.PartnerCategory,
             permissions: permissions,
             mustChangePassword: user.MustChangePassword
-        }, JWT_SECRET, { expiresIn: '8h' });
+        });
 
         res.json({
             token,
@@ -298,14 +384,43 @@ app.post('/api/auth/login', async (req, res) => {
 
     } catch (err) {
         console.error('Login Error:', err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Login failed' });
     }
 });
 
 // 2. ADMIN CREATE USER (New Flow)
-app.post('/api/users', authenticateToken, async (req, res) => {
+app.post('/api/users', authenticateToken, requirePermission('USERS_CREATE'), async (req, res) => {
     try {
-        const { name, email, roleId, buId, userType, partnerCategory } = req.body; // Added partnerCategory
+        const { name, email, roleId, buId, userType, partnerCategory } = req.body;
+
+        // Input validation
+        if (!isValidEmail(email)) {
+            return res.status(400).json({ error: 'Invalid email format' });
+        }
+
+        if (!isValidLength(name, 2, 100)) {
+            return res.status(400).json({ error: 'Name must be between 2 and 100 characters' });
+        }
+
+        if (roleId && !isValidInteger(roleId)) {
+            return res.status(400).json({ error: 'Invalid role ID' });
+        }
+
+        if (buId && !isValidInteger(buId)) {
+            return res.status(400).json({ error: 'Invalid business unit ID' });
+        }
+
+        const sanitizedName = sanitizeString(name);
+        const sanitizedUserType = userType?.toUpperCase() || 'INTERNAL';
+
+        if (!isValidUserType(sanitizedUserType)) {
+            return res.status(400).json({ error: 'Invalid user type. Must be INTERNAL or PARTNER' });
+        }
+
+        if (partnerCategory && !isValidPartnerCategory(partnerCategory)) {
+            return res.status(400).json({ error: 'Invalid partner category. Must be Bronze, Silver, or Gold' });
+        }
+
         const pool = await connectToDatabase();
 
         const check = await pool.request()
@@ -317,31 +432,38 @@ app.post('/api/users', authenticateToken, async (req, res) => {
         const hash = await bcrypt.hash(tempPassword, 10);
 
         await pool.request()
-            .input('Name', sql.NVarChar, name)
+            .input('Name', sql.NVarChar, sanitizedName)
             .input('Email', sql.NVarChar, email)
             .input('Hash', sql.NVarChar, hash)
             .input('RoleId', sql.Int, roleId || null)
             .input('BuId', sql.Int, buId || null)
-            .input('UserType', sql.NVarChar, userType || 'INTERNAL')
+            .input('UserType', sql.NVarChar, sanitizedUserType)
             .input('PartnerCategory', sql.NVarChar, partnerCategory || null)
             .query(`
-                INSERT INTO Users(Name, Email, PasswordHash, Status, MustChangePassword, RoleId, BusinessUnitId, UserType, PartnerCategory)
-        VALUES(@Name, @Email, @Hash, 'ACTIVE', 1, @RoleId, @BuId, @UserType, @PartnerCategory)
+                INSERT INTO Users (Name, Email, PasswordHash, Status, MustChangePassword, RoleId, BusinessUnitId, UserType, PartnerCategory)
+                VALUES (@Name, @Email, @Hash, 'APPROVED', 1, @RoleId, @BuId, @UserType, @PartnerCategory)
             `);
 
         await sendCredentialsEmail(email, tempPassword);
-        await logAudit(pool, req.user?.id, 'CREATE_USER', 'User', email, { name, roleId, buId });
-        res.status(201).json({ message: 'User created successfully', tempPassword });
+        await logAudit(pool, req.user?.id, 'CREATE_USER', 'User', email, { name: sanitizedName, email, roleId, buId, userType: sanitizedUserType, partnerCategory });
+        res.json({ message: 'User created successfully. Credentials sent.', tempPassword });
     } catch (err) {
         console.error('Create User Error:', err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to create user' });
     }
 });
 
 // 4. CHANGE PASSWORD
 app.post('/api/auth/change-password', async (req, res) => {
     try {
-        const { userId, newPassword } = req.body; // In real app, extract userId from JWT middleware
+        const { userId, newPassword } = req.body;
+
+        // Validate password strength
+        if (!isValidPassword(newPassword)) {
+            const message = getPasswordStrengthMessage(newPassword);
+            return res.status(400).json({ error: message });
+        }
+
         const pool = await connectToDatabase();
 
         const hash = await bcrypt.hash(newPassword, 10);
@@ -359,33 +481,41 @@ app.post('/api/auth/change-password', async (req, res) => {
 
     } catch (err) {
         console.error('Change Password Error:', err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Password change failed' });
     }
 });
 
 // GET Business Units
-app.get('/api/admin/business-units', async (req, res) => {
+app.get('/api/admin/business-units', authenticateToken, requirePermission('BU_VIEW'), async (req, res) => {
     try {
         const pool = await connectToDatabase();
         const result = await pool.request().query('SELECT * FROM BusinessUnits');
         res.json(result.recordset);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to fetch business units' });
     }
 });
 
 // CREATE Business Unit
-app.post('/api/admin/business-units', authenticateToken, async (req, res) => {
+app.post('/api/admin/business-units', authenticateToken, requirePermission('BU_MANAGE'), async (req, res) => {
     try {
         const { name } = req.body;
+
+        // Validate name
+        if (!isValidLength(name, 2, 100)) {
+            return res.status(400).json({ error: 'Business unit name must be between 2 and 100 characters' });
+        }
+
+        const sanitizedName = sanitizeString(name);
         const pool = await connectToDatabase();
+
         await pool.request()
-            .input('Name', sql.NVarChar, name)
+            .input('Name', sql.NVarChar, sanitizedName)
             .query('INSERT INTO BusinessUnits (Name) VALUES (@Name)');
-        await logAudit(pool, req.user?.id, 'CREATE_BU', 'BusinessUnit', name, null);
+        await logAudit(pool, req.user?.id, 'CREATE_BU', 'BusinessUnit', sanitizedName, null);
         res.json({ message: 'Business Unit added.' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to create business unit' });
     }
 });
 // CREATE BU
@@ -402,86 +532,132 @@ app.post('/api/admin/bus', authenticateToken, async (req, res) => {
 });
 
 // EDIT BU
-app.put('/api/admin/bus/:id', authenticateToken, async (req, res) => {
+app.put('/api/admin/bus/:id', authenticateToken, requirePermission('BU_MANAGE'), async (req, res) => {
     try {
         const { id } = req.params;
         const { name } = req.body;
+
+        // Validate inputs
+        if (!isValidInteger(id)) {
+            return res.status(400).json({ error: 'Invalid business unit ID' });
+        }
+
+        if (!isValidLength(name, 2, 100)) {
+            return res.status(400).json({ error: 'Business unit name must be between 2 and 100 characters' });
+        }
+
+        const sanitizedName = sanitizeString(name);
         const pool = await connectToDatabase();
+
         await pool.request()
             .input('Id', sql.Int, id)
-            .input('Name', sql.NVarChar, name)
+            .input('Name', sql.NVarChar, sanitizedName)
             .query('UPDATE BusinessUnits SET Name = @Name WHERE Id = @Id');
-        await logAudit(pool, req.user?.id, 'UPDATE_BU', 'BusinessUnit', id, { name });
+        await logAudit(pool, req.user?.id, 'UPDATE_BU', 'BusinessUnit', id, { name: sanitizedName });
         res.json({ message: 'BU updated' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to update business unit' });
     }
 });
 
 // DELETE BU
-app.delete('/api/admin/bus/:id', authenticateToken, async (req, res) => {
+app.delete('/api/admin/bus/:id', authenticateToken, requirePermission('BU_MANAGE'), async (req, res) => {
     try {
         const { id } = req.params;
+
+        // Validate ID
+        if (!isValidInteger(id)) {
+            return res.status(400).json({ error: 'Invalid business unit ID' });
+        }
+
         const pool = await connectToDatabase();
         await pool.request().input('Id', sql.Int, id).query('DELETE FROM BusinessUnits WHERE Id = @Id');
         await logAudit(pool, req.user?.id, 'DELETE_BU', 'BusinessUnit', id, null);
         res.json({ message: 'BU deleted' });
     } catch (err) {
-        res.status(500).json({ error: 'Cannot delete BU in use or error occured' });
+        res.status(500).json({ error: 'Cannot delete business unit in use or error occurred' });
     }
 });
 
 // GET Roles
-app.get('/api/admin/roles', async (req, res) => {
+app.get('/api/admin/roles', authenticateToken, requirePermission('ROLES_VIEW'), async (req, res) => {
     try {
         const pool = await connectToDatabase();
         const result = await pool.request().query('SELECT * FROM Roles');
         res.json(result.recordset);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to fetch roles' });
     }
 });
 
 // CREATE ROLE
-app.post('/api/admin/roles', authenticateToken, async (req, res) => {
+app.post('/api/admin/roles', authenticateToken, requirePermission('ROLES_MANAGE'), async (req, res) => {
     try {
         const { name } = req.body;
+
+        // Validate name
+        if (!isValidLength(name, 2, 50)) {
+            return res.status(400).json({ error: 'Role name must be between 2 and 50 characters' });
+        }
+
+        const sanitizedName = sanitizeString(name);
         const pool = await connectToDatabase();
-        const result = await pool.request().input('Name', sql.NVarChar, name).query('INSERT INTO Roles (Name) OUTPUT INSERTED.Id, INSERTED.Name VALUES (@Name)');
-        await logAudit(pool, req.user?.id, 'CREATE_ROLE', 'Role', result.recordset[0].Id, { name });
+
+        const result = await pool.request()
+            .input('Name', sql.NVarChar, sanitizedName)
+            .query('INSERT INTO Roles (Name) OUTPUT INSERTED.Id, INSERTED.Name VALUES (@Name)');
+        await logAudit(pool, req.user?.id, 'CREATE_ROLE', 'Role', result.recordset[0].Id, { name: sanitizedName });
         res.json(result.recordset[0]);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to create role' });
     }
 });
 
 // EDIT ROLE
-app.put('/api/admin/roles/:id', authenticateToken, async (req, res) => {
+app.put('/api/admin/roles/:id', authenticateToken, requirePermission('ROLES_MANAGE'), async (req, res) => {
     try {
         const { id } = req.params;
         const { name } = req.body;
+
+        // Validate inputs
+        if (!isValidInteger(id)) {
+            return res.status(400).json({ error: 'Invalid role ID' });
+        }
+
+        if (!isValidLength(name, 2, 50)) {
+            return res.status(400).json({ error: 'Role name must be between 2 and 50 characters' });
+        }
+
+        const sanitizedName = sanitizeString(name);
         const pool = await connectToDatabase();
+
         await pool.request()
             .input('Id', sql.Int, id)
-            .input('Name', sql.NVarChar, name)
+            .input('Name', sql.NVarChar, sanitizedName)
             .query('UPDATE Roles SET Name = @Name WHERE Id = @Id');
-        await logAudit(pool, req.user?.id, 'UPDATE_ROLE', 'Role', id, { name });
+        await logAudit(pool, req.user?.id, 'UPDATE_ROLE', 'Role', id, { name: sanitizedName });
         res.json({ message: 'Role updated' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to update role' });
     }
 });
 
 // DELETE ROLE
-app.delete('/api/admin/roles/:id', authenticateToken, async (req, res) => {
+app.delete('/api/admin/roles/:id', authenticateToken, requirePermission('ROLES_MANAGE'), async (req, res) => {
     try {
         const { id } = req.params;
+
+        // Validate ID
+        if (!isValidInteger(id)) {
+            return res.status(400).json({ error: 'Invalid role ID' });
+        }
+
         const pool = await connectToDatabase();
         await pool.request().input('Id', sql.Int, id).query('DELETE FROM Roles WHERE Id = @Id');
         await logAudit(pool, req.user?.id, 'DELETE_ROLE', 'Role', id, null);
         res.json({ message: 'Role deleted' });
     } catch (err) {
-        res.status(500).json({ error: 'Cannot delete role in use or error occured' });
+        res.status(500).json({ error: 'Cannot delete role in use or error occurred' });
     }
 });
 
@@ -532,11 +708,22 @@ app.post('/api/admin/roles/:id/permissions', authenticateToken, async (req, res)
 
             // Insert new (if any)
             if (permissionIds && permissionIds.length > 0) {
-                const request = transaction.request();
+                // Validate all IDs are positive integers
+                const invalidIds = permissionIds.filter(id => !Number.isInteger(Number(id)) || Number(id) <= 0);
+                if (invalidIds.length > 0) {
+                    await transaction.rollback();
+                    return res.status(400).json({ error: 'Invalid permission IDs provided' });
+                }
+
+                // Use parameterized queries to prevent SQL injection
                 for (const pId of permissionIds) {
-                    await request.query(`
-                        INSERT INTO RolePermissions (RoleId, PermissionId) VALUES (${id}, ${pId})
-                    `);
+                    await transaction.request()
+                        .input('RoleId', sql.Int, id)
+                        .input('PermissionId', sql.Int, pId)
+                        .query(`
+                            INSERT INTO RolePermissions (RoleId, PermissionId) 
+                            VALUES (@RoleId, @PermissionId)
+                        `);
                 }
             }
 
@@ -596,10 +783,24 @@ app.get('/api/admin/permissions', async (req, res) => {
 });
 
 // UPDATE USER ROLE & BU
-app.put('/api/admin/users/:id/role-bu', authenticateToken, async (req, res) => {
+app.put('/api/admin/users/:id/role-bu', authenticateToken, requirePermission('USERS_MANAGE'), async (req, res) => {
     try {
         const { id } = req.params;
         const { roleId, buId } = req.body;
+
+        // Validate inputs
+        if (!isValidInteger(id)) {
+            return res.status(400).json({ error: 'Invalid user ID' });
+        }
+
+        if (roleId && !isValidInteger(roleId)) {
+            return res.status(400).json({ error: 'Invalid role ID' });
+        }
+
+        if (buId && !isValidInteger(buId)) {
+            return res.status(400).json({ error: 'Invalid business unit ID' });
+        }
+
         const pool = await connectToDatabase();
 
         await pool.request()
@@ -608,34 +809,93 @@ app.put('/api/admin/users/:id/role-bu', authenticateToken, async (req, res) => {
             .input('BuId', sql.Int, buId)
             .query('UPDATE Users SET RoleId = @RoleId, BusinessUnitId = @BuId WHERE Id = @Id');
 
-
-
         await logAudit(pool, req.user?.id, 'UPDATE_USER_ROLE', 'User', id, { roleId, buId });
         res.json({ message: 'User updated successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to update user role' });
     }
 });
 
 // DELETE USER
-app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
+app.delete('/api/admin/users/:id', authenticateToken, requirePermission('USERS_DELETE'), async (req, res) => {
     try {
         const { id } = req.params;
+
+        // Validate ID
+        if (!isValidInteger(id)) {
+            return res.status(400).json({ error: 'Invalid user ID' });
+        }
+
         const pool = await connectToDatabase();
 
         await pool.request()
             .input('Id', sql.Int, id)
             .query('Delete FROM Users WHERE Id = @Id');
 
-
-
         await logAudit(pool, req.user?.id, 'DELETE_USER', 'User', id, null);
         res.json({ message: 'User deleted successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to delete user' });
     }
 });
 
+
+// --- SYSTEM SETTINGS ENDPOINTS ---
+app.get('/api/admin/system-settings', authenticateToken, requirePermission('SYSTEM_SETTINGS_VIEW'), async (req, res) => {
+    try {
+        const pool = await connectToDatabase();
+        const result = await pool.request().query('SELECT [Key], Value FROM SystemSettings');
+
+        // Convert to key-value object
+        const settings = {};
+        result.recordset.forEach(row => {
+            settings[row.Key] = row.Value;
+        });
+
+        res.json(settings);
+    } catch (err) {
+        console.error('Get System Settings Error:', err);
+        res.status(500).json({ error: 'Failed to fetch system settings' });
+    }
+});
+
+app.post('/api/admin/system-settings', authenticateToken, requirePermission('SYSTEM_SETTINGS_MANAGE'), async (req, res) => {
+    try {
+        const { apiKey, modelName } = req.body;
+        const pool = await connectToDatabase();
+
+        // Update or insert GEMINI_API_KEY
+        if (apiKey !== undefined) {
+            await pool.request()
+                .input('key', sql.NVarChar(100), 'GEMINI_API_KEY')
+                .input('value', sql.NVarChar(sql.MAX), apiKey)
+                .query(`
+                    IF EXISTS (SELECT * FROM SystemSettings WHERE [Key] = @key)
+                        UPDATE SystemSettings SET Value = @value, UpdatedAt = GETDATE() WHERE [Key] = @key
+                    ELSE
+                        INSERT INTO SystemSettings ([Key], Value) VALUES (@key, @value)
+                `);
+        }
+
+        // Update or insert GEMINI_MODEL
+        if (modelName !== undefined) {
+            await pool.request()
+                .input('key', sql.NVarChar(100), 'GEMINI_MODEL')
+                .input('value', sql.NVarChar(sql.MAX), modelName)
+                .query(`
+                    IF EXISTS (SELECT * FROM SystemSettings WHERE [Key] = @key)
+                        UPDATE SystemSettings SET Value = @value, UpdatedAt = GETDATE() WHERE [Key] = @key
+                    ELSE
+                        INSERT INTO SystemSettings ([Key], Value) VALUES (@key, @value)
+                `);
+        }
+
+        res.json({ message: 'System settings updated successfully' });
+    } catch (err) {
+        console.error('Update System Settings Error:', err);
+        res.status(500).json({ error: 'Failed to update system settings' });
+    }
+});
 // GET all products -- ENHANCED LOGGING
 
 // GET all products -- ENHANCED LOGGING
@@ -695,15 +955,33 @@ app.get('/api/products', authenticateToken, async (req, res) => {
 });
 
 // CREATE Product
-app.post('/api/products', authenticateToken, async (req, res) => {
+app.post('/api/products', authenticateToken, requirePermission('PRODUCTS_MANAGE'), async (req, res) => {
     try {
         const { name, category, description, problemSolved, itLandscape, deploymentModels, licensing, pricingBand, notToSell, capabilities } = req.body;
+
+        // Validate inputs
+        if (!isValidLength(name, 2, 200)) {
+            return res.status(400).json({ error: 'Product name must be between 2 and 200 characters' });
+        }
+
+        if (description && !isValidLength(description, 0, 1000)) {
+            return res.status(400).json({ error: 'Description must not exceed 1000 characters' });
+        }
+
+        if (category && !isValidLength(category, 0, 100)) {
+            return res.status(400).json({ error: 'Category must not exceed 100 characters' });
+        }
+
+        const sanitizedName = sanitizeString(name);
+        const sanitizedDescription = description ? sanitizeString(description) : null;
+        const sanitizedCategory = category ? sanitizeString(category) : null;
+
         const pool = await connectToDatabase();
 
         await pool.request()
-            .input('Name', sql.NVarChar, name)
-            .input('Category', sql.NVarChar, category)
-            .input('Description', sql.NVarChar, description)
+            .input('Name', sql.NVarChar, sanitizedName)
+            .input('Category', sql.NVarChar, sanitizedCategory)
+            .input('Description', sql.NVarChar, sanitizedDescription)
             .input('ProblemSolved', sql.NVarChar, problemSolved)
             .input('ItLandscape', sql.NVarChar, JSON.stringify(itLandscape))
             .input('DeploymentModels', sql.NVarChar, JSON.stringify(deploymentModels))
@@ -716,25 +994,47 @@ app.post('/api/products', authenticateToken, async (req, res) => {
         VALUES(@Name, @Category, @Description, @ProblemSolved, @ItLandscape, @DeploymentModels, @Licensing, @PricingBand, @NotToSell, @Capabilities)
             `);
 
-        await logAudit(pool, req.user?.id, 'CREATE_PRODUCT', 'Product', name, { category });
+        await logAudit(pool, req.user?.id, 'CREATE_PRODUCT', 'Product', sanitizedName, { category: sanitizedCategory });
         res.status(201).json({ message: 'Product created successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to create product' });
     }
 });
 
 // UPDATE Product
-app.put('/api/products/:id', authenticateToken, async (req, res) => {
+app.put('/api/products/:id', authenticateToken, requirePermission('PRODUCTS_MANAGE'), async (req, res) => {
     try {
         const { id } = req.params;
         const { name, category, description, problemSolved, itLandscape, deploymentModels, licensing, pricingBand, notToSell, capabilities } = req.body;
+
+        // Validate inputs
+        if (!isValidInteger(id)) {
+            return res.status(400).json({ error: 'Invalid product ID' });
+        }
+
+        if (name && !isValidLength(name, 2, 200)) {
+            return res.status(400).json({ error: 'Product name must be between 2 and 200 characters' });
+        }
+
+        if (description && !isValidLength(description, 0, 1000)) {
+            return res.status(400).json({ error: 'Description must not exceed 1000 characters' });
+        }
+
+        if (category && !isValidLength(category, 0, 100)) {
+            return res.status(400).json({ error: 'Category must not exceed 100 characters' });
+        }
+
+        const sanitizedName = name ? sanitizeString(name) : name;
+        const sanitizedDescription = description ? sanitizeString(description) : description;
+        const sanitizedCategory = category ? sanitizeString(category) : category;
+
         const pool = await connectToDatabase();
 
         await pool.request()
-            .input('Id', sql.Int, id) // Changed to Int
-            .input('Name', sql.NVarChar, name)
-            .input('Category', sql.NVarChar, category)
-            .input('Description', sql.NVarChar, description)
+            .input('Id', sql.Int, id)
+            .input('Name', sql.NVarChar, sanitizedName)
+            .input('Category', sql.NVarChar, sanitizedCategory)
+            .input('Description', sql.NVarChar, sanitizedDescription)
             .input('ProblemSolved', sql.NVarChar, problemSolved)
             .input('ItLandscape', sql.NVarChar, JSON.stringify(itLandscape))
             .input('DeploymentModels', sql.NVarChar, JSON.stringify(deploymentModels))
@@ -750,10 +1050,10 @@ app.put('/api/products/:id', authenticateToken, async (req, res) => {
                 WHERE Id = @Id
             `);
 
-        await logAudit(pool, req.user?.id, 'UPDATE_PRODUCT', 'Product', id, { name });
+        await logAudit(pool, req.user?.id, 'UPDATE_PRODUCT', 'Product', id, { name: sanitizedName });
         res.json({ message: 'Product updated successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Failed to update product' });
     }
 });
 
@@ -932,17 +1232,27 @@ app.post('/api/ai/chat', authenticateToken, async (req, res) => {
     try {
         const { messages, context } = req.body;
 
-        if (!process.env.GEMINI_API_KEY) {
-            console.error('Gemini API Key is missing');
-            return res.status(500).json({ error: 'AI service configuration error' });
+        // Validate messages
+        if (!messages || !Array.isArray(messages) || messages.length === 0) {
+            return res.status(400).json({ error: 'Messages array is required' });
         }
 
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        // Validate each message
+        for (const msg of messages) {
+            if (!msg.content || !isValidLength(msg.content, 1, 10000)) {
+                return res.status(400).json({ error: 'Message content must be between 1 and 10000 characters' });
+            }
+        }
 
-        // Construct the prompt
-        // Messages come in as { role: 'user' | 'assistant', content: string }
-        // We need to format them for the model or just pass as text sequence
-        // Simple approach: combine them
+        // Read API Key from Header (preferred) or Body
+        const apiKey = req.headers['x-gemini-api-key'] || req.body.apiKey;
+
+        if (!apiKey) {
+            console.error('[AI Chat] Missing API Key');
+            return res.status(400).json({ error: 'Gemini API Key is required. Please set it in your application settings.' });
+        }
+
+        console.log(`[AI Chat] Received request. Key length: ${apiKey.length}, Key prefix: ${apiKey.substring(0, 4)}...`);
 
         const conversationHistory = messages.map(m => `${m.role}: ${m.content}`).join('\n');
 
@@ -951,29 +1261,16 @@ app.post('/api/ai/chat', authenticateToken, async (req, res) => {
             
             Current Conversation:
             ${conversationHistory}
-            
-            Assistant Response:
         `;
 
-        const response = await ai.models.generateContent({
-            model: 'gemini-flash-latest',
-            contents: [
-                { role: 'user', parts: [{ text: prompt }] }
-            ]
-        });
+        console.log('[AI Chat] Sending prompt to Gemini...');
+        const response = await generateContent(prompt, apiKey);
+        console.log('[AI Chat] Received response from Gemini');
 
-        let text = '';
-        if (response.candidates && response.candidates[0]?.content?.parts?.[0]?.text) {
-            text = response.candidates[0].content.parts[0].text;
-        } else if (typeof response.text === 'function') {
-            text = response.text();
-        }
-
-        res.json({ response: text });
-
+        res.json({ response: response });
     } catch (err) {
-        console.error('AI Chat Error:', err);
-        res.status(500).json({ error: 'Failed to generate AI response' });
+        console.error('[AI Chat] Error:', err.message);
+        res.status(500).json({ error: 'Failed to process AI chat request' });
     }
 });
 
@@ -1047,6 +1344,75 @@ app.get('/api/competitors', authenticateToken, async (req, res) => {
     }
 });
 
+// --- USER PREFERENCES ROUTES ---
+
+// GET User Preferences
+app.get('/api/user/preferences', authenticateToken, async (req, res) => {
+    try {
+        const pool = await connectToDatabase();
+        const result = await pool.request()
+            .input('UserId', sql.Int, req.user.id)
+            .query('SELECT * FROM UserPreferences WHERE UserId = @UserId');
+
+        if (result.recordset.length === 0) {
+            // Create default preferences if they don't exist
+            await pool.request()
+                .input('UserId', sql.Int, req.user.id)
+                .query('INSERT INTO UserPreferences (UserId, Theme) VALUES (@UserId, \'light\')');
+
+            return res.json({ userId: req.user.id, theme: 'light' });
+        }
+
+        const prefs = result.recordset[0];
+        res.json({
+            userId: prefs.UserId,
+            theme: prefs.Theme
+        });
+    } catch (err) {
+        console.error('Get Preferences Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// UPDATE Theme Preference
+app.put('/api/user/preferences/theme', authenticateToken, async (req, res) => {
+    try {
+        const { theme } = req.body;
+
+        // Validate theme value
+        if (!['light', 'dark'].includes(theme)) {
+            return res.status(400).json({ error: 'Invalid theme value. Must be "light" or "dark"' });
+        }
+
+        const pool = await connectToDatabase();
+
+        // Check if preferences exist
+        const check = await pool.request()
+            .input('UserId', sql.Int, req.user.id)
+            .query('SELECT Id FROM UserPreferences WHERE UserId = @UserId');
+
+        if (check.recordset.length === 0) {
+            // Create new preferences
+            await pool.request()
+                .input('UserId', sql.Int, req.user.id)
+                .input('Theme', sql.NVarChar, theme)
+                .query('INSERT INTO UserPreferences (UserId, Theme) VALUES (@UserId, @Theme)');
+        } else {
+            // Update existing preferences
+            await pool.request()
+                .input('UserId', sql.Int, req.user.id)
+                .input('Theme', sql.NVarChar, theme)
+                .query('UPDATE UserPreferences SET Theme = @Theme, UpdatedAt = GETDATE() WHERE UserId = @UserId');
+        }
+
+        await logAudit(pool, req.user.id, 'UPDATE_THEME', 'UserPreferences', req.user.id, { theme });
+        res.json({ message: 'Theme updated successfully', theme });
+    } catch (err) {
+        console.error('Update Theme Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/learning-paths', authenticateToken, async (req, res) => {
     try {
         const pool = await connectToDatabase();
@@ -1064,23 +1430,17 @@ app.get('/api/learning-paths', authenticateToken, async (req, res) => {
     }
 });
 
-app.get('/api/assets', authenticateToken, async (req, res) => {
-    try {
-        const pool = await connectToDatabase();
-        const result = await pool.request().query('SELECT * FROM Assets');
-        const data = result.recordset.map(r => ({
-            title: r.Title,
-            type: r.Type,
-            stage: r.Stage,
-            audience: r.Audience,
-            size: r.Size
-        }));
-        res.json(data);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
+// Only start server if not in test mode
+if (process.env.NODE_ENV !== 'test') {
+    app.listen(PORT, () => {
+        console.log(`Server running on http://localhost:${PORT}`);
+        ensureStorageDirectory(); // Ensure storage directory exists on startup
+    });
+}
 
-app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-});
+// Error handler middleware - must be last
+app.use(errorHandler);
+
+// Export app for testing
+export default app;
+

@@ -380,16 +380,114 @@ export const DataService = {
         return response.json();
     },
 
+    async uploadAsset(file: File, metadata: { title?: string; salesStage?: string; audience?: string; category?: string }) {
+        const formData = new FormData();
+        formData.append('file', file);
+        if (metadata.title) formData.append('title', metadata.title);
+        if (metadata.salesStage) formData.append('salesStage', metadata.salesStage);
+        if (metadata.audience) formData.append('audience', metadata.audience);
+        if (metadata.category) formData.append('category', metadata.category);
+
+        const token = localStorage.getItem('token');
+        const response = await fetch(`${API_URL}/assets`, {
+            method: 'POST',
+            headers: {
+                'Authorization': token ? `Bearer ${token}` : ''
+            },
+            body: formData
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || 'Failed to upload asset');
+        }
+        return response.json();
+    },
+
+    async downloadAsset(id: number, filename: string) {
+        const response = await fetch(`${API_URL}/assets/${id}/download`, { headers: getHeaders() });
+        if (!response.ok) throw new Error('Failed to download asset');
+
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+    },
+
+    async updateAsset(id: number, metadata: { title?: string; salesStage?: string; audience?: string; category?: string }) {
+        const response = await fetch(`${API_URL}/assets/${id}`, {
+            method: 'PUT',
+            headers: getHeaders(),
+            body: JSON.stringify(metadata)
+        });
+        if (!response.ok) throw new Error('Failed to update asset');
+        return response.json();
+    },
+
+    async deleteAsset(id: number) {
+        const response = await fetch(`${API_URL}/assets/${id}`, {
+            method: 'DELETE',
+            headers: getHeaders()
+        });
+        if (!response.ok) throw new Error('Failed to delete asset');
+        return response.json();
+    },
+
     // --- AI ASSISTANT ---
     async chatWithAI(messages: { role: string; content: string }[], context: string) {
+        const apiKey = localStorage.getItem('gemini-api-key');
+        const headers = getHeaders();
+        if (apiKey) {
+            (headers as any)['x-gemini-api-key'] = apiKey;
+        }
+
         const response = await fetch(`${API_URL}/ai/chat`, {
             method: 'POST',
-            headers: getHeaders(),
+            headers: headers,
             body: JSON.stringify({ messages, context })
         });
         if (!response.ok) {
             const err = await response.json().catch(() => ({}));
             throw new Error(err.error || 'Failed to get AI response');
+        }
+        return response.json();
+    },
+
+    // --- VERSION ASSIGNMENTS ---
+    async getUserFileAssignments(userId: number) {
+        const response = await fetch(`${API_URL}/assets/admin/users/${userId}/assignments`, { headers: getHeaders() });
+        if (!response.ok) throw new Error('Failed to fetch user assignments');
+        return response.json();
+    },
+
+    async searchAssets(query: string) {
+        const response = await fetch(`${API_URL}/assets/admin/assets/search?q=${encodeURIComponent(query)}`, { headers: getHeaders() });
+        if (!response.ok) throw new Error('Failed to search assets');
+        return response.json();
+    },
+
+    async getFileVersionsById(fileId: number) {
+        // We use the file ID to get versions (the endpoint expects an ID that belongs to the group)
+        const response = await fetch(`${API_URL}/assets/files/${fileId}/versions`, { headers: getHeaders() });
+        if (!response.ok) throw new Error('Failed to fetch file versions');
+        return response.json();
+    },
+
+    async assignUserFileVersion(userId: number, assetFileId: number | null, versionGroupId: string) {
+        const response = await fetch(`${API_URL}/assets/admin/assign-version`, {
+            method: 'POST',
+            headers: getHeaders(),
+            body: JSON.stringify({ userId, assetFileId, versionGroupId })
+        });
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+            console.error('Assignment failed:', errorData);
+            throw new Error(errorData.error || 'Failed to assign version');
         }
         return response.json();
     }

@@ -6,8 +6,13 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load .env.local from project root
-dotenv.config({ path: path.resolve(__dirname, '../.env.local') });
+// Load .env.local from project root or resources path in prod
+const isProd = process.env.NODE_ENV === 'production' || process.resourcesPath;
+const envPath = isProd
+    ? path.join(process.resourcesPath, '.env.local')
+    : path.resolve(__dirname, '../.env.local');
+
+dotenv.config({ path: envPath });
 
 // Configuration matching user provided details
 const config = {
