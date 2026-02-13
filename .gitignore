@@ -7,15 +7,22 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies
 node_modules
+
+# Build outputs
 dist
 dist-ssr
 dist-electron
 dist-app
 release
-*.local
 
-# Editor directories and files
+# Environment files
+*.local
+.env.local
+.env.production
+
+# Editor directories
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -25,3 +32,27 @@ release
 *.njsproj
 *.sln
 *.sw?
+
+# Test outputs
+test-results/
+playwright-report/
+coverage/
+
+# Debug files
+*_out.json
+*_out.txt
+debug_*.js
+test_*.js
+*_dump.json
+assignment_status.json
+
+# Local storage (use cloud storage in production)
+storage/
+uploads/
+
+# AI agent workspaces
+.agents/
+.claude/
+
+# Electron (uncomment if not deploying desktop app)
+ electron/
