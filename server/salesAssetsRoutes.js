@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
-import { connectToDatabase, sql } from './db.js';
+import { connectToDatabase, sql } from './db-postgres-compat.js';
 import { logAudit } from './audit.js';
 import { verifyToken } from './middleware/security.js';
 import {
