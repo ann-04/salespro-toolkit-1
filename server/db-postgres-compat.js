@@ -83,6 +83,28 @@ class PostgresRequest {
             pgQuery = pgQuery.replace(new RegExp(paramPlaceholder, 'g'), pgPlaceholder);
         });
 
+        // Convert PascalCase table names to lowercase
+        // This handles: FROM Users, JOIN Roles, etc.
+        const tableNameMap = {
+            'Users': 'users',
+            'Roles': 'roles',
+            'BusinessUnits': 'businessunits',
+            'Products': 'products',
+            'Folders': 'folders',
+            'SalesAssets': 'salesassets',
+            'Permissions': 'permissions',
+            'RolePermissions': 'rolepermissions',
+            'AuditLogs': 'auditlogs',
+            'AppSettings': 'appsettings'
+        };
+
+        // Replace table names (case-insensitive, word boundary)
+        Object.entries(tableNameMap).forEach(([pascalCase, lowercase]) => {
+            // Match table names in FROM, JOIN, UPDATE, INSERT INTO, DELETE FROM
+            const regex = new RegExp(`\\b${pascalCase}\\b`, 'g');
+            pgQuery = pgQuery.replace(regex, lowercase);
+        });
+
         // Replace MS SQL specific functions
         pgQuery = pgQuery.replace(/GETDATE\(\)/g, 'NOW()');
         pgQuery = pgQuery.replace(/ISNULL\(/g, 'COALESCE(');
