@@ -324,11 +324,16 @@ app.post('/api/auth/login', async (req, res) => {
         const result = await pool.request()
             .input('Email', sql.NVarChar, email)
             .query(`
-                SELECT u.*, r.Name as RoleName, b.Name as BuName 
+                SELECT 
+                    u."Id", u."Name", u."Email", u."PasswordHash", u."Status", 
+                    u."MustChangePassword", u."UserType", u."PartnerCategory", 
+                    u."RoleId", u."BusinessUnitId", u."CreatedAt", u."LastLogin",
+                    r."Name" as "RoleName", 
+                    b."Name" as "BuName"
                 FROM Users u
-                LEFT JOIN Roles r ON u.RoleId = r.Id
-                LEFT JOIN BusinessUnits b ON u.BusinessUnitId = b.Id
-                WHERE u.Email = @Email
+                LEFT JOIN Roles r ON u."RoleId" = r."Id"
+                LEFT JOIN BusinessUnits b ON u."BusinessUnitId" = b."Id"
+                WHERE u."Email" = @Email
             `);
 
         const user = result.recordset[0];
