@@ -102,6 +102,12 @@ class PostgresRequest {
             pgQuery = pgQuery.replace(regex, lowercase);
         });
 
+        // Remove quotes from column names and convert to lowercase
+        // This handles: u."RoleId" -> u.roleid, "Name" -> name, etc.
+        pgQuery = pgQuery.replace(/"([A-Za-z][A-Za-z0-9]*)"/g, (match, columnName) => {
+            return columnName.toLowerCase();
+        });
+
         // Replace MS SQL specific functions
         pgQuery = pgQuery.replace(/GETDATE\(\)/g, 'NOW()');
         pgQuery = pgQuery.replace(/ISNULL\(/g, 'COALESCE(');
