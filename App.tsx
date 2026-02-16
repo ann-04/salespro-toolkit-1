@@ -59,8 +59,9 @@ const App: React.FC = () => {
         return;
       }
 
+      const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
       try {
-        const response = await fetch('http://localhost:3000/api/user/preferences', {
+        const response = await fetch(`${API_URL}/api/user/preferences`, {
           headers: {
             'Authorization': `Bearer ${token}`
           }
@@ -95,9 +96,10 @@ const App: React.FC = () => {
     console.log('Toggling theme from', theme, 'to', newTheme);
     setTheme(newTheme);
 
+    const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
     if (token) {
       try {
-        const response = await fetch('http://localhost:3000/api/user/preferences/theme', {
+        const response = await fetch(`${API_URL}/api/user/preferences/theme`, {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/json',

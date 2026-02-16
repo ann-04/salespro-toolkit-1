@@ -1,0 +1,45 @@
+services:
+  # Backend API Server
+  - type: web
+    name: salespro-api
+    env: node
+    region: singapore
+    plan: free
+    buildCommand: npm install
+    startCommand: node server/index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_EXPIRES_IN
+        value: 15m
+      - key: JWT_ISSUER
+        value: salespro-toolkit
+      - key: JWT_AUDIENCE
+        value: salespro-api
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: MAX_FILE_SIZE_MB
+        value: 50
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+  # Frontend Static Site
+  - type: web
+    name: salespro-frontend
+    env: static
+    region: singapore
+    plan: free
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: salespro-api
+          envVarKey: RENDER_EXTERNAL_URL
