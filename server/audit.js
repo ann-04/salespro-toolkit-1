@@ -1,4 +1,4 @@
-import { sql } from './db.js';
+import { sql } from './db-postgres-compat.js';
 
 export async function logAudit(pool, userId, action, entity, entityId, details) {
     try {

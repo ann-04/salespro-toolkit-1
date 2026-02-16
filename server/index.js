@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { connectToDatabase, sql } from './db.js';
+import { connectToDatabase, sql } from './db-postgres-compat.js';
 import { logAudit } from './audit.js';
 import { generateContent } from './services/geminiService.js';
 import dotenv from 'dotenv';
@@ -46,15 +46,15 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const isProd = process.env.NODE_ENV === 'production' || process.resourcesPath;
-const envPath = isProd
-    ? path.join(process.resourcesPath, '.env.local')
-    : path.resolve(__dirname, '../.env.local');
-
-dotenv.config({ path: envPath });
+// Load environment variables
+// In production (Render), env vars are set directly, no .env file needed
+if (process.env.NODE_ENV !== 'production') {
+    const envPath = path.resolve(__dirname, '../.env.local');
+    dotenv.config({ path: envPath });
+}
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // CORS Configuration - restrict to allowed origins
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173'];
