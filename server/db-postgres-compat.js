@@ -84,7 +84,6 @@ class PostgresRequest {
         });
 
         // Convert PascalCase table names to lowercase
-        // This handles: FROM Users, JOIN Roles, etc.
         const tableNameMap = {
             'Users': 'users',
             'Roles': 'roles',
@@ -98,9 +97,7 @@ class PostgresRequest {
             'AppSettings': 'appsettings'
         };
 
-        // Replace table names (case-insensitive, word boundary)
         Object.entries(tableNameMap).forEach(([pascalCase, lowercase]) => {
-            // Match table names in FROM, JOIN, UPDATE, INSERT INTO, DELETE FROM
             const regex = new RegExp(`\\b${pascalCase}\\b`, 'g');
             pgQuery = pgQuery.replace(regex, lowercase);
         });
@@ -108,17 +105,17 @@ class PostgresRequest {
         // Replace MS SQL specific functions
         pgQuery = pgQuery.replace(/GETDATE\(\)/g, 'NOW()');
         pgQuery = pgQuery.replace(/ISNULL\(/g, 'COALESCE(');
-
-        // Handle OUTPUT INSERTED.* (MS SQL) -> RETURNING * (PostgreSQL)
         pgQuery = pgQuery.replace(/OUTPUT INSERTED\.\*/g, 'RETURNING *');
         pgQuery = pgQuery.replace(/OUTPUT INSERTED\.(\w+)/g, 'RETURNING $1');
 
         try {
             const result = await this.pool.query(pgQuery, this.params);
 
-            // Convert PostgreSQL result to MS SQL format
+            // Convert lowercase column names to PascalCase for backend compatibility
+            const convertedRows = result.rows.map(row => convertToPascalCase(row));
+
             return {
-                recordset: result.rows,
+                recordset: convertedRows,
                 rowsAffected: [result.rowCount],
                 rowCount: result.rowCount
             };
@@ -130,6 +127,75 @@ class PostgresRequest {
             throw error;
         }
     }
+}
+
+/**
+ * Convert lowercase PostgreSQL column names to PascalCase
+ * This allows existing backend code to work without changes
+ */
+function convertToPascalCase(row) {
+    const converted = {};
+
+    // Map of lowercase to PascalCase column names
+    const columnMap = {
+        'id': 'Id',
+        'name': 'Name',
+        'email': 'Email',
+        'passwordhash': 'PasswordHash',
+        'status': 'Status',
+        'mustchangepassword': 'MustChangePassword',
+        'usertype': 'UserType',
+        'partnercategory': 'PartnerCategory',
+        'roleid': 'RoleId',
+        'businessunitid': 'BusinessUnitId',
+        'createdat': 'CreatedAt',
+        'lastlogin': 'LastLogin',
+        'rolename': 'RoleName',
+        'buname': 'BuName',
+        'description': 'Description',
+        'module': 'Module',
+        'action': 'Action',
+        'permissionid': 'PermissionId',
+        'productid': 'ProductId',
+        'folderid': 'FolderId',
+        'title': 'Title',
+        'filename': 'FileName',
+        'storedfilename': 'StoredFileName',
+        'filetype': 'FileType',
+        'filesize': 'FileSize',
+        'filepath': 'FilePath',
+        'uploadedby': 'UploadedBy',
+        'uploadedat': 'UploadedAt',
+        'version': 'Version',
+        'versiongroupid': 'VersionGroupId',
+        'islatestversion': 'IsLatestVersion',
+        'tags': 'Tags',
+        'contenttype': 'ContentType',
+        'extractedtext': 'ExtractedText',
+        'userid': 'UserId',
+        'entity': 'Entity',
+        'entityid': 'EntityId',
+        'details': 'Details',
+        'timestamp': 'Timestamp',
+        'settingkey': 'SettingKey',
+        'settingvalue': 'SettingValue',
+        'updatedat': 'UpdatedAt',
+        'updatedby': 'UpdatedBy'
+    };
+
+    for (const [key, value] of Object.entries(row)) {
+        const pascalKey = columnMap[key.toLowerCase()] || capitalizeFirst(key);
+        converted[pascalKey] = value;
+    }
+
+    return converted;
+}
+
+/**
+ * Capitalize first letter of a string
+ */
+function capitalizeFirst(str) {
+    return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
 /**
