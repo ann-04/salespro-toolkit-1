@@ -89,6 +89,8 @@ class PostgresRequest {
             'Roles': 'roles',
             'BusinessUnits': 'businessunits',
             'Products': 'products',
+            'Categories': 'categories',
+            'PartnerCategories': 'partnercategories',
             'Folders': 'folders',
             'SalesAssets': 'salesassets',
             'Permissions': 'permissions',
