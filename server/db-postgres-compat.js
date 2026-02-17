@@ -164,6 +164,16 @@ function convertToPascalCase(row) {
         'permissionid': 'PermissionId',
         'productid': 'ProductId',
         'folderid': 'FolderId',
+        // Product columns
+        'category': 'Category',
+        'problemsolved': 'ProblemSolved',
+        'itlandscape': 'ItLandscape',
+        'deploymentmodels': 'DeploymentModels',
+        'licensing': 'Licensing',
+        'pricingband': 'PricingBand',
+        'nottosell': 'NotToSell',
+        'capabilities': 'Capabilities',
+        // Sales Assets columns
         'title': 'Title',
         'filename': 'FileName',
         'storedfilename': 'StoredFileName',
@@ -178,11 +188,13 @@ function convertToPascalCase(row) {
         'tags': 'Tags',
         'contenttype': 'ContentType',
         'extractedtext': 'ExtractedText',
+        // Audit columns
         'userid': 'UserId',
         'entity': 'Entity',
         'entityid': 'EntityId',
         'details': 'Details',
         'timestamp': 'Timestamp',
+        // Settings columns
         'settingkey': 'SettingKey',
         'settingvalue': 'SettingValue',
         'updatedat': 'UpdatedAt',
