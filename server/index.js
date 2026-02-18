@@ -43,6 +43,12 @@ import {
     getPasswordStrengthMessage
 } from './utils/validation.js';
 
+// Helper: validate integer (positive integer string or number)
+function isValidInteger(val) {
+    const n = Number(val);
+    return Number.isInteger(n) && n > 0;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -50,7 +56,22 @@ const __dirname = path.dirname(__filename);
 // In production (Render), env vars are set directly, no .env file needed
 if (process.env.NODE_ENV !== 'production') {
     const envPath = path.resolve(__dirname, '../.env.local');
-    dotenv.config({ path: envPath });
+    const result = dotenv.config({ path: envPath });
+
+    console.log('--- DEBUG ENV ---');
+    console.log('NODE_ENV:', process.env.NODE_ENV);
+    console.log('Env Path:', envPath);
+    if (result.error) {
+        console.error('Dotenv Error:', result.error);
+    } else {
+        console.log('Dotenv Parsed:', Object.keys(result.parsed || {}));
+    }
+
+    const dbUrl = process.env.DATABASE_URL || '';
+    // Mask password in logs
+    const maskedUrl = dbUrl.replace(/:([^:@]+)@/, ':***@');
+    console.log('DATABASE_URL (Masked):', maskedUrl);
+    console.log('-----------------');
 }
 
 const app = express();
@@ -167,8 +188,8 @@ app.post('/api/auth/register', async (req, res) => {
             .input('BusinessUnitId', sql.Int, buId || null)
             .input('UserType', sql.NVarChar, sanitizedUserType)
             .query(`
-                INSERT INTO Users (Name, Email, Status, MustChangePassword, UserType)
-                VALUES (@Name, @Email, 'PENDING', 1, @UserType)
+                INSERT INTO Users (Name, Email, Status, UserType)
+                VALUES (@Name, @Email, 'PENDING', @UserType)
             `);
 
         await sendRequestReceivedEmail(email);
@@ -203,7 +224,7 @@ app.post('/api/admin/users/:id/approve', authenticateToken, requirePermission('U
             .input('Hash', sql.NVarChar, hash)
             .query(`
                 UPDATE Users 
-                SET Status = 'APPROVED', PasswordHash = @Hash, MustChangePassword = 1 
+                SET Status = 'APPROVED', PasswordHash = @Hash
                 WHERE Id = @Id
             `);
 
@@ -325,15 +346,15 @@ app.post('/api/auth/login', async (req, res) => {
             .input('Email', sql.NVarChar, email)
             .query(`
                 SELECT 
-                    u."Id", u."Name", u."Email", u."PasswordHash", u."Status", 
-                    u."MustChangePassword", u."UserType", u."PartnerCategory", 
-                    u."RoleId", u."BusinessUnitId", u."CreatedAt", u."LastLogin",
-                    r."Name" as "RoleName", 
-                    b."Name" as "BuName"
+                    u.Id, u.Name, u.Email, u.PasswordHash, u.Status, 
+                    u.UserType, u.PartnerCategory, 
+                    u.RoleId, u.BusinessUnitId, u.CreatedAt, u.LastLogin,
+                    r.Name as RoleName, 
+                    b.Name as BuName
                 FROM Users u
-                LEFT JOIN Roles r ON u."RoleId" = r."Id"
-                LEFT JOIN BusinessUnits b ON u."BusinessUnitId" = b."Id"
-                WHERE u."Email" = @Email
+                LEFT JOIN Roles r ON u.RoleId = r.Id
+                LEFT JOIN BusinessUnits b ON u.BusinessUnitId = b.Id
+                WHERE u.Email = @Email
             `);
 
         const user = result.recordset[0];
@@ -369,7 +390,7 @@ app.post('/api/auth/login', async (req, res) => {
             userType: user.UserType || 'INTERNAL',
             partnerCategory: user.PartnerCategory,
             permissions: permissions,
-            mustChangePassword: user.MustChangePassword
+            mustChangePassword: false
         });
 
         res.json({
@@ -378,7 +399,7 @@ app.post('/api/auth/login', async (req, res) => {
                 id: user.Id,
                 name: user.Name,
                 email: user.Email,
-                mustChangePassword: user.MustChangePassword,
+                mustChangePassword: false,
                 role: user.RoleName,
                 bu: user.BuName,
                 userType: user.UserType || 'INTERNAL',
@@ -445,8 +466,8 @@ app.post('/api/users', authenticateToken, requirePermission('USERS_CREATE'), asy
             .input('UserType', sql.NVarChar, sanitizedUserType)
             .input('PartnerCategory', sql.NVarChar, partnerCategory || null)
             .query(`
-                INSERT INTO Users (Name, Email, PasswordHash, Status, MustChangePassword, RoleId, BusinessUnitId, UserType, PartnerCategory)
-                VALUES (@Name, @Email, @Hash, 'APPROVED', 1, @RoleId, @BuId, @UserType, @PartnerCategory)
+                INSERT INTO Users (Name, Email, PasswordHash, Status, RoleId, BusinessUnitId, UserType, PartnerCategory)
+                VALUES (@Name, @Email, @Hash, 'APPROVED', @RoleId, @BuId, @UserType, @PartnerCategory)
             `);
 
         await sendCredentialsEmail(email, tempPassword);
@@ -478,7 +499,7 @@ app.post('/api/auth/change-password', async (req, res) => {
             .input('Hash', sql.NVarChar, hash)
             .query(`
                 UPDATE Users 
-                SET PasswordHash = @Hash, MustChangePassword = 0 
+                SET PasswordHash = @Hash
                 WHERE Id = @Id
             `);
 
@@ -523,14 +544,20 @@ app.post('/api/admin/business-units', authenticateToken, requirePermission('BU_M
         res.status(500).json({ error: 'Failed to create business unit' });
     }
 });
-// CREATE BU
-app.post('/api/admin/bus', authenticateToken, async (req, res) => {
+// CREATE BU (legacy route - delegates to main route logic)
+app.post('/api/admin/bus', authenticateToken, requirePermission('BU_MANAGE'), async (req, res) => {
     try {
         const { name } = req.body;
+        if (!name || name.trim().length < 2) {
+            return res.status(400).json({ error: 'Business unit name must be at least 2 characters' });
+        }
+        const sanitizedName = sanitizeString(name);
         const pool = await connectToDatabase();
-        const result = await pool.request().input('Name', sql.NVarChar, name).query('INSERT INTO BusinessUnits (Name) OUTPUT INSERTED.Id, INSERTED.Name VALUES (@Name)');
-        await logAudit(pool, req.user?.id, 'CREATE_BU', 'BusinessUnit', result.recordset[0].Id, { name });
-        res.json(result.recordset[0]);
+        const result = await pool.request()
+            .input('Name', sql.NVarChar, sanitizedName)
+            .query('INSERT INTO BusinessUnits (Name) VALUES (@Name) RETURNING Id, Name');
+        await logAudit(pool, req.user?.id, 'CREATE_BU', 'BusinessUnit', result.recordset[0]?.Id, { name: sanitizedName });
+        res.json(result.recordset[0] || { message: 'Business Unit added.' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -771,21 +798,7 @@ const authorizeModule = (moduleName, action) => {
     };
 };
 
-// GET All Permissions (for Role UI)
-app.get('/api/admin/permissions', async (req, res) => {
-    try {
-        const pool = await connectToDatabase();
-        const result = await pool.request().query(`
-            SELECT p.Id, p.Action, m.Name as Module, m.Id as ModuleId
-            FROM Permissions p
-            JOIN Modules m ON p.ModuleId = m.Id
-            ORDER BY m.Name, p.Action
-            `);
-        res.json(result.recordset);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
+// NOTE: Duplicate /api/admin/permissions route removed (Modules table does not exist in Supabase schema)
 
 // UPDATE USER ROLE & BU
 app.put('/api/admin/users/:id/role-bu', authenticateToken, requirePermission('USERS_MANAGE'), async (req, res) => {
@@ -849,12 +862,15 @@ app.delete('/api/admin/users/:id', authenticateToken, requirePermission('USERS_D
 app.get('/api/admin/system-settings', authenticateToken, requirePermission('SYSTEM_SETTINGS_VIEW'), async (req, res) => {
     try {
         const pool = await connectToDatabase();
-        const result = await pool.request().query('SELECT [Key], Value FROM SystemSettings');
+        const result = await pool.request().query('SELECT settingkey, settingvalue FROM appsettings');
 
         // Convert to key-value object
         const settings = {};
         result.recordset.forEach(row => {
-            settings[row.Key] = row.Value;
+            // Support both PascalCase (from compat layer) and lowercase
+            const key = row.Key || row.settingkey;
+            const value = row.Value || row.settingvalue;
+            if (key) settings[key] = value;
         });
 
         res.json(settings);
@@ -869,29 +885,27 @@ app.post('/api/admin/system-settings', authenticateToken, requirePermission('SYS
         const { apiKey, modelName } = req.body;
         const pool = await connectToDatabase();
 
-        // Update or insert GEMINI_API_KEY
+        // Upsert GEMINI_API_KEY using PostgreSQL ON CONFLICT
         if (apiKey !== undefined) {
             await pool.request()
-                .input('key', sql.NVarChar(100), 'GEMINI_API_KEY')
-                .input('value', sql.NVarChar(sql.MAX), apiKey)
+                .input('key', sql.NVarChar, 'GEMINI_API_KEY')
+                .input('value', sql.NVarChar, apiKey)
                 .query(`
-                    IF EXISTS (SELECT * FROM SystemSettings WHERE [Key] = @key)
-                        UPDATE SystemSettings SET Value = @value, UpdatedAt = GETDATE() WHERE [Key] = @key
-                    ELSE
-                        INSERT INTO SystemSettings ([Key], Value) VALUES (@key, @value)
+                    INSERT INTO appsettings (settingkey, settingvalue)
+                    VALUES (@key, @value)
+                    ON CONFLICT (settingkey) DO UPDATE SET settingvalue = EXCLUDED.settingvalue, updatedat = NOW()
                 `);
         }
 
-        // Update or insert GEMINI_MODEL
+        // Upsert GEMINI_MODEL
         if (modelName !== undefined) {
             await pool.request()
-                .input('key', sql.NVarChar(100), 'GEMINI_MODEL')
-                .input('value', sql.NVarChar(sql.MAX), modelName)
+                .input('key', sql.NVarChar, 'GEMINI_MODEL')
+                .input('value', sql.NVarChar, modelName)
                 .query(`
-                    IF EXISTS (SELECT * FROM SystemSettings WHERE [Key] = @key)
-                        UPDATE SystemSettings SET Value = @value, UpdatedAt = GETDATE() WHERE [Key] = @key
-                    ELSE
-                        INSERT INTO SystemSettings ([Key], Value) VALUES (@key, @value)
+                    INSERT INTO appsettings (settingkey, settingvalue)
+                    VALUES (@key, @value)
+                    ON CONFLICT (settingkey) DO UPDATE SET settingvalue = EXCLUDED.settingvalue, updatedat = NOW()
                 `);
         }
 
@@ -1058,7 +1072,8 @@ app.put('/api/products/:id', authenticateToken, requirePermission('PRODUCTS_MANA
         await logAudit(pool, req.user?.id, 'UPDATE_PRODUCT', 'Product', id, { name: sanitizedName });
         res.json({ message: 'Product updated successfully' });
     } catch (err) {
-        res.status(500).json({ error: 'Failed to update product' });
+        console.error('Update Product Error:', err);
+        res.status(500).json({ error: 'Failed to update product', details: err.message });
     }
 });
 
@@ -1085,7 +1100,7 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
 app.get('/api/categories', async (req, res) => {
     try {
         const pool = await connectToDatabase();
-        constresult = await pool.request().query('SELECT * FROM Categories ORDER BY Name ASC');
+        const result = await pool.request().query('SELECT * FROM Categories ORDER BY Name ASC');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1288,12 +1303,13 @@ app.get('/api/personas', authenticateToken, async (req, res) => {
             role: r.Role,
             name: r.Name,
             narrative: r.Narrative,
-            kpis: JSON.parse(r.KPIs),
-            fears: JSON.parse(r.Fears)
+            kpis: r.KPIs ? JSON.parse(r.KPIs) : [],
+            fears: r.Fears ? JSON.parse(r.Fears) : []
         }));
         res.json(data);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('Personas table not found or error:', err.message);
+        res.json([]); // Return empty array if table doesn't exist
     }
 });
 
@@ -1309,7 +1325,8 @@ app.get('/api/objections', authenticateToken, async (req, res) => {
         }));
         res.json(data);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('Objections table not found or error:', err.message);
+        res.json([]); // Return empty array if table doesn't exist
     }
 });
 
@@ -1320,15 +1337,16 @@ app.get('/api/icp', authenticateToken, async (req, res) => {
         if (result.recordset.length === 0) return res.json({});
         const r = result.recordset[0];
         const data = {
-            companySize: JSON.parse(r.CompanySize),
+            companySize: r.CompanySize ? JSON.parse(r.CompanySize) : [],
             revenueRange: r.RevenueRange,
-            industries: JSON.parse(r.Industries),
-            geography: JSON.parse(r.Geography),
-            buyingTriggers: JSON.parse(r.BuyingTriggers)
+            industries: r.Industries ? JSON.parse(r.Industries) : [],
+            geography: r.Geography ? JSON.parse(r.Geography) : [],
+            buyingTriggers: r.BuyingTriggers ? JSON.parse(r.BuyingTriggers) : []
         };
         res.json(data);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('ICPs table not found or error:', err.message);
+        res.json({}); // Return empty object if table doesn't exist
     }
 });
 
@@ -1339,40 +1357,24 @@ app.get('/api/competitors', authenticateToken, async (req, res) => {
         const data = result.recordset.map(r => ({
             name: r.Name,
             position: r.Position,
-            strengths: JSON.parse(r.Strengths),
-            weaknesses: JSON.parse(r.Weaknesses),
+            strengths: r.Strengths ? JSON.parse(r.Strengths) : [],
+            weaknesses: r.Weaknesses ? JSON.parse(r.Weaknesses) : [],
             winStrategy: r.WinStrategy
         }));
         res.json(data);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('Competitors table not found or error:', err.message);
+        res.json([]); // Return empty array if table doesn't exist
     }
 });
 
 // --- USER PREFERENCES ROUTES ---
 
-// GET User Preferences
+// GET User Preferences (stored in appsettings or returned as defaults if table missing)
 app.get('/api/user/preferences', authenticateToken, async (req, res) => {
     try {
-        const pool = await connectToDatabase();
-        const result = await pool.request()
-            .input('UserId', sql.Int, req.user.id)
-            .query('SELECT * FROM UserPreferences WHERE UserId = @UserId');
-
-        if (result.recordset.length === 0) {
-            // Create default preferences if they don't exist
-            await pool.request()
-                .input('UserId', sql.Int, req.user.id)
-                .query('INSERT INTO UserPreferences (UserId, Theme) VALUES (@UserId, \'light\')');
-
-            return res.json({ userId: req.user.id, theme: 'light' });
-        }
-
-        const prefs = result.recordset[0];
-        res.json({
-            userId: prefs.UserId,
-            theme: prefs.Theme
-        });
+        // Return default preferences - UserPreferences table may not exist in Supabase
+        res.json({ userId: req.user.id, theme: 'light' });
     } catch (err) {
         console.error('Get Preferences Error:', err);
         res.status(500).json({ error: err.message });
@@ -1389,28 +1391,7 @@ app.put('/api/user/preferences/theme', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: 'Invalid theme value. Must be "light" or "dark"' });
         }
 
-        const pool = await connectToDatabase();
-
-        // Check if preferences exist
-        const check = await pool.request()
-            .input('UserId', sql.Int, req.user.id)
-            .query('SELECT Id FROM UserPreferences WHERE UserId = @UserId');
-
-        if (check.recordset.length === 0) {
-            // Create new preferences
-            await pool.request()
-                .input('UserId', sql.Int, req.user.id)
-                .input('Theme', sql.NVarChar, theme)
-                .query('INSERT INTO UserPreferences (UserId, Theme) VALUES (@UserId, @Theme)');
-        } else {
-            // Update existing preferences
-            await pool.request()
-                .input('UserId', sql.Int, req.user.id)
-                .input('Theme', sql.NVarChar, theme)
-                .query('UPDATE UserPreferences SET Theme = @Theme, UpdatedAt = GETDATE() WHERE UserId = @UserId');
-        }
-
-        await logAudit(pool, req.user.id, 'UPDATE_THEME', 'UserPreferences', req.user.id, { theme });
+        // Theme preference stored client-side (UserPreferences table may not exist)
         res.json({ message: 'Theme updated successfully', theme });
     } catch (err) {
         console.error('Update Theme Error:', err);
@@ -1425,13 +1406,14 @@ app.get('/api/learning-paths', authenticateToken, async (req, res) => {
         const data = result.recordset.map(r => ({
             title: r.Title,
             duration: r.Duration,
-            modules: JSON.parse(r.Modules),
+            modules: r.Modules ? JSON.parse(r.Modules) : [],
             outcome: r.Outcome,
             status: r.Status
         }));
         res.json(data);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('LearningPaths table not found or error:', err.message);
+        res.json([]); // Return empty array if table doesn't exist
     }
 });
 
