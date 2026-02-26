@@ -1,0 +1,19 @@
+﻿[dotenv@17.2.3] injecting env (7) from .env.local -- tip: ≡ƒôí add observability to secrets: https://dotenvx.com/ops
+Initializing PostgreSQL Pool...
+Γ£à PostgreSQL connection pool created
+--- DB QUERY ---
+Original: SELECT Module, Action FROM permissions WHERE UPPER(module) NOT LIKE 'ASSET%' ORDER BY module, action
+Converted: SELECT Module, Action FROM permissions WHERE UPPER(module) NOT LIKE 'ASSET%' ORDER BY module, action
+Params: []
+Non-asset permissions (Module/Action raw values):
+  Module="CATEGORIES"  Action="MANAGE"  => combined: "CATEGORIES_MANAGE"
+  Module="CATEGORIES"  Action="VIEW"  => combined: "CATEGORIES_VIEW"
+  Module="DEPARTMENTS"  Action="MANAGE"  => combined: "DEPARTMENTS_MANAGE"
+  Module="DEPARTMENTS"  Action="VIEW"  => combined: "DEPARTMENTS_VIEW"
+  Module="PRODUCTS"  Action="MANAGE"  => combined: "PRODUCTS_MANAGE"
+  Module="PRODUCTS"  Action="VIEW"  => combined: "PRODUCTS_VIEW"
+  Module="ROLES"  Action="MANAGE"  => combined: "ROLES_MANAGE"
+  Module="ROLES"  Action="VIEW"  => combined: "ROLES_VIEW"
+  Module="USERS"  Action="CREATE"  => combined: "USERS_CREATE"
+  Module="USERS"  Action="MANAGE"  => combined: "USERS_MANAGE"
+  Module="USERS"  Action="VIEW"  => combined: "USERS_VIEW"

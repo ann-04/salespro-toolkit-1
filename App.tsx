@@ -25,7 +25,17 @@ const App: React.FC = () => {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem('token'));
 
   const [isRegistering, setIsRegistering] = useState(false);
-  const [activePillar, setActivePillar] = useState<Pillar>(Pillar.DASHBOARD);
+  const [activePillar, setActivePillar] = useState<Pillar>(() => {
+    const saved = localStorage.getItem('activePillar');
+    return (saved && Object.values(Pillar).includes(saved as Pillar))
+      ? (saved as Pillar)
+      : Pillar.DASHBOARD;
+  });
+
+  // Persist active tab whenever it changes
+  useEffect(() => {
+    localStorage.setItem('activePillar', activePillar);
+  }, [activePillar]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   // Gemini Key State
@@ -146,7 +156,15 @@ const App: React.FC = () => {
     // RBAC Protection for Admin Panel
     if (activePillar === Pillar.ADMIN) {
       const allowedRoles = ['Admin', 'Sales Manager', 'Product Manager'];
-      if (!user?.role || !allowedRoles.includes(user.role)) {
+      const governancePerms = [
+        'USERS_VIEW', 'USERS_CREATE', 'USERS_MANAGE', 'USERS_APPROVE',
+        'DEPARTMENTS_VIEW', 'DEPARTMENTS_CREATE', 'DEPARTMENTS_MANAGE',
+        'ROLES_UPDATE', 'ROLES_CREATE', 'ROLES_DELETE',
+        'PRODUCTS_CREATE', 'PRODUCTS_UPDATE', 'PRODUCTS_DELETE',
+        'AUDIT_DELETE', 'CATEGORIES_MANAGE',
+      ];
+      const hasGovPerm = user?.permissions?.some((p: string) => governancePerms.includes(p));
+      if (!allowedRoles.includes(user?.role || '') && !hasGovPerm) {
         return <Dashboard user={user} />;
       }
     }
@@ -170,7 +188,16 @@ const App: React.FC = () => {
       {/* Gemini Key Modal */}
       {isKeyModalOpen && (
         <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-8 text-center animate-fadeIn">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-8 text-center animate-fadeIn relative">
+            <button
+              onClick={() => setIsKeyModalOpen(false)}
+              className="absolute top-3 right-3 text-slate-400 hover:text-slate-600 transition p-1 rounded-full hover:bg-slate-100"
+              title="Close"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
             <div className="bg-indigo-100 p-3 rounded-full w-16 h-16 flex items-center justify-center mx-auto mb-4">
               <span className="text-3xl">🔑</span>
             </div>
@@ -238,6 +265,7 @@ const App: React.FC = () => {
             localStorage.removeItem('user');
             localStorage.removeItem('token');
             localStorage.removeItem('gemini-api-key'); // Clear key on logout
+            localStorage.removeItem('activePillar'); // Reset tab on logout
             setGeminiKey(null); // Clear state
 
             // Force page reload to ensure Login component appears

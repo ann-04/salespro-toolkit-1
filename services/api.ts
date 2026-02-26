@@ -90,7 +90,10 @@ export const DataService = {
             headers: getHeaders(), // Protected route
             body: JSON.stringify(data),
         });
-        if (!response.ok) throw new Error('Password change failed');
+        if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            throw new Error(body.error || 'Password change failed');
+        }
         return response.json();
     },
 

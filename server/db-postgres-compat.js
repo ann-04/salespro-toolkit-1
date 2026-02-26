@@ -65,7 +65,18 @@ const tableNameMap = {
     'RolePermissions': 'rolepermissions',
     'AuditLogs': 'auditlogs',
     'AppSettings': 'appsettings',
-    'SystemSettings': 'appsettings'  // Map old name to new
+    'SystemSettings': 'appsettings',
+    // Asset repository tables
+    'AssetBusinessUnits': 'assetbusinessunits',
+    'AssetProducts': 'assetproducts',
+    'AssetFolders': 'assetfolders',
+    'AssetFiles': 'assetfiles',
+    'AssetFileTags': 'assetfiletags',
+    'AssetFileContentTypes': 'assetfilecontenttypes',
+    'AssetFileAssignments': 'assetfileassignments',
+    'AssetPermissions': 'assetpermissions',
+    'UserAssetPermissions': 'userassetpermissions',
+    'ContentTypes': 'contenttypes'
 };
 
 /**
@@ -88,8 +99,62 @@ function convertQuery(queryText, paramNames, params) {
 
     // Replace MS SQL specific functions
     pgQuery = pgQuery.replace(/GETDATE\(\)/gi, 'NOW()');
+    pgQuery = pgQuery.replace(/NEWID\(\)/gi, 'gen_random_uuid()');
     pgQuery = pgQuery.replace(/ISNULL\(/gi, 'COALESCE(');
     pgQuery = pgQuery.replace(/\bTOP\s+(\d+)\b/gi, 'LIMIT $1');
+
+    // Convert IsDeleted/IsArchived integer booleans to PostgreSQL booleans
+    // Use (?<!@) negative lookbehind to avoid converting @IsDeleted/@IsArchived parameter placeholders
+    pgQuery = pgQuery.replace(/(?<!@)\bIsDeleted\s*=\s*0\b/gi, 'is_deleted = false');
+    pgQuery = pgQuery.replace(/(?<!@)\bIsDeleted\s*=\s*1\b/gi, 'is_deleted = true');
+    pgQuery = pgQuery.replace(/(?<!@)\bIsArchived\s*=\s*0\b/gi, 'is_archived = false');
+    pgQuery = pgQuery.replace(/(?<!@)\bIsArchived\s*=\s*1\b/gi, 'is_archived = true');
+    // Also handle SET IsDeleted = @Param style (keep as-is, PostgreSQL accepts true/false from JS boolean)
+    pgQuery = pgQuery.replace(/(?<!@)\bIsDeleted\b/g, 'is_deleted');
+    pgQuery = pgQuery.replace(/(?<!@)\bIsArchived\b/g, 'is_archived');
+
+    // Normalize PascalCase column names to lowercase (for PostgreSQL compatibility)
+    // This handles column references like af.CreatedBy, f.ProductId, etc.
+    const columnNameMap = {
+        'CreatedBy': 'created_by',
+        'UpdatedBy': 'updated_by',
+        'CreatedAt': 'created_at',
+        'UpdatedAt': 'updated_at',
+        'BusinessUnitId': 'businessunitid',
+        'ProductId': 'productid',
+        'FolderId': 'folderid',
+        'UserId': 'userid',
+        'RoleId': 'roleid',
+        'PermissionId': 'permissionid',
+        'GrantedBy': 'granted_by',
+        'AssignedBy': 'assignedby',
+        'AssetFileId': 'assetfileid',
+        'VersionGroupId': 'versiongroupid',
+        'VersionNumber': 'versionnumber',
+        'OriginalFileName': 'originalfilename',
+        'StoredFileName': 'storedfilename',
+        'FileType': 'filetype',
+        'FileSize': 'filesize',
+        'StoragePath': 'storagepath',
+        'AudienceLevel': 'audiencelevel',
+        'TagName': 'tagname',
+        'ContentTypeId': 'contenttypeid',
+        'PermissionCode': 'permissioncode',
+        'ResourceType': 'resourcetype',
+        'PasswordHash': 'passwordhash',
+        'UserType': 'usertype',
+        'PartnerCategoryId': 'partnercategoryid',
+        'MustChangePassword': 'mustchangepassword',
+        'LastLogin': 'lastlogin',
+        'ParentFolderId': 'parentfolderid',
+        'IsPublic': 'ispublic'
+    };
+    Object.entries(columnNameMap).forEach(([pascal, lower]) => {
+        // Use (?<!@) negative lookbehind so we never convert @ParamName placeholders,
+        // only actual column references like u.RoleId, af.BusinessUnitId, etc.
+        const regex = new RegExp(`(?<!@)\\b${pascal}\\b`, 'g');
+        pgQuery = pgQuery.replace(regex, lower);
+    });
 
     // Handle IF EXISTS ... UPDATE ... ELSE ... INSERT (MS SQL UPSERT pattern)
     // Convert to PostgreSQL INSERT ... ON CONFLICT DO UPDATE
@@ -202,7 +267,36 @@ function convertToPascalCase(row) {
         'tags': 'Tags',
         'contenttype': 'ContentType',
         'extractedtext': 'ExtractedText',
-        'count': 'count'  // keep lowercase for aggregate functions
+        'count': 'count',  // keep lowercase for aggregate functions
+        // Asset repository columns
+        'is_deleted': 'IsDeleted',
+        'is_archived': 'IsArchived',
+        'originalfilename': 'OriginalFileName',
+        'storedfilename': 'StoredFileName',
+        'filetype': 'FileType',
+        'filesize': 'FileSize',
+        'storagepath': 'StoragePath',
+        'audiencelevel': 'AudienceLevel',
+        'versiongroupid': 'VersionGroupId',
+        'versionnumber': 'VersionNumber',
+        'tagname': 'TagName',
+        'contenttypeid': 'ContentTypeId',
+        'assetfileid': 'AssetFileId',
+        'assignedby': 'AssignedBy',
+        'permissioncode': 'PermissionCode',
+        'resourcetype': 'ResourceType',
+        'permissionid': 'PermissionId',
+        'grantedby': 'GrantedBy',
+        'maxver': 'MaxVer',
+        'newid': 'newId',
+        'latestid': 'LatestId',
+        'uploadedbyname': 'UploadedByName',
+        'maxversion': 'MaxVersion',
+        'created_at': 'CreatedAt',
+        'updated_at': 'UpdatedAt',
+        'created_by': 'CreatedBy',
+        'updated_by': 'UpdatedBy',
+        'granted_by': 'GrantedBy'
     };
 
     const converted = {};

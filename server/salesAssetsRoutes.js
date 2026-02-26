@@ -33,7 +33,7 @@ if (!fs.existsSync('uploads/temp')) {
     fs.mkdirSync('uploads/temp', { recursive: true });
 }
 
-// Permission Check Middleware for Assets
+// Permission Check Middleware for Assets (role-based)
 const authorizeAssetPermission = (permissionCode) => {
     return async (req, res, next) => {
         try {
@@ -45,25 +45,23 @@ const authorizeAssetPermission = (permissionCode) => {
             req.user = decoded;
 
             // Admin bypass
-            if (decoded.role === 'Admin') return next();
+            if (decoded.role === 'Admin' || decoded.roleName === 'Admin') return next();
 
             // Allow all authenticated users to READ (view) assets
-            // Only check permissions for CREATE, UPDATE, DELETE operations
             if (permissionCode.endsWith('_READ')) {
-                // All authenticated users can view assets
                 return next();
             }
 
-            // For CREATE, UPDATE, DELETE operations, check if user has the required permission
+            // For CREATE, UPDATE, DELETE — check the user's ROLE permissions
             const pool = await connectToDatabase();
             const result = await pool.request()
-                .input('UserId', sql.Int, decoded.id)
+                .input('RoleId', sql.Int, decoded.roleId)
                 .input('PermCode', sql.NVarChar, permissionCode)
                 .query(`
                     SELECT COUNT(*) as count
-                    FROM UserAssetPermissions uap
-                    JOIN AssetPermissions ap ON uap.PermissionId = ap.Id
-                    WHERE uap.UserId = @UserId AND ap.PermissionCode = @PermCode
+                    FROM rolepermissions rp
+                    JOIN permissions p ON rp.permissionid = p.Id
+                    WHERE rp.roleid = @RoleId AND p.Action = @PermCode
                 `);
 
             if (result.recordset[0].count === 0) {
@@ -538,10 +536,13 @@ router.get('/folders/:folderId/files', authenticateToken, authorizeAssetPermissi
 
         query += ` ORDER BY af.CreatedAt ${orderBy}`;
 
-        const result = await pool.request()
-            .input('FolderId', sql.Int, folderId)
-            .input('UserId', sql.Int, req.user.id) // Add UserId for the subquery
-            .query(query);
+        const req1 = pool.request()
+            .input('FolderId', sql.Int, folderId);
+        // Only add UserId if @UserId is used in the query (PARTNER users only)
+        if (req.user.userType === 'PARTNER') {
+            req1.input('UserId', sql.Int, req.user.id);
+        }
+        const result = await req1.query(query);
 
         // Fetch Assignments for this user (if Partner) or general knowledge (if Internal wanting to debug? No, tailored view).
         let userAssignments = new Set();
@@ -753,13 +754,13 @@ router.post('/folders/:folderId/files', authenticateToken, authorizeAssetPermiss
             .input('FolderId', sql.Int, folderId)
             .query(`
                 SELECT 
-                    f.Id as FolderId,
-                    p.Id as ProductId,
-                    bu.Id as BusinessUnitId
-                FROM AssetFolders f
-                JOIN AssetProducts p ON f.ProductId = p.Id
-                JOIN AssetBusinessUnits bu ON p.BusinessUnitId = bu.Id
-                WHERE f.Id = @FolderId
+                    f.id as FolderId,
+                    p.id as ProductId,
+                    bu.id as BusinessUnitId
+                FROM assetfolders f
+                JOIN assetproducts p ON f.productid = p.id
+                JOIN assetbusinessunits bu ON p.businessunitid = bu.id
+                WHERE f.id = $1
             `);
 
         if (hierarchyResult.recordset.length === 0) {
@@ -831,7 +832,7 @@ router.post('/folders/:folderId/files', authenticateToken, authorizeAssetPermiss
             // Simpler: Just rely on DB "default" if I allowed it, but I didn't set default in schema for that param (I did for table though? No, I did Update).
             // Let's generate one in JS for clarity or use UUID lib if available. 
             // Or simpler: `SELECT NEWID() as newId`.
-            const idRes = await pool.request().query('SELECT NEWID() as newId');
+            const idRes = await pool.request().query('SELECT gen_random_uuid() as newid');
             versionGroupId = idRes.recordset[0].newId;
         }
 
@@ -845,7 +846,7 @@ router.post('/folders/:folderId/files', authenticateToken, authorizeAssetPermiss
             .input('FileSize', sql.BigInt, fileSize)
             .input('StoragePath', sql.NVarChar, finalStoragePath)
             .input('Description', sql.NVarChar, description || null)
-            .input('IsArchived', sql.Bit, isArchived ? 1 : 0)
+            .input('IsArchived', sql.Bit, isArchived === true || isArchived === 'true')
             .input('AudienceLevel', sql.NVarChar, audienceLevel || 'Internal')
             .input('CreatedBy', sql.Int, req.user.id)
             .input('VersionGroupId', sql.NVarChar, versionGroupId) // New
@@ -915,13 +916,13 @@ router.post('/folders/:folderId/files/bulk', authenticateToken, authorizeAssetPe
             .input('FolderId', sql.Int, folderId)
             .query(`
                 SELECT 
-                    f.Id as FolderId,
-                    p.Id as ProductId,
-                    bu.Id as BusinessUnitId
-                FROM AssetFolders f
-                JOIN AssetProducts p ON f.ProductId = p.Id
-                JOIN AssetBusinessUnits bu ON p.BusinessUnitId = bu.Id
-                WHERE f.Id = @FolderId
+                    f.id as FolderId,
+                    p.id as ProductId,
+                    bu.id as BusinessUnitId
+                FROM assetfolders f
+                JOIN assetproducts p ON f.productid = p.id
+                JOIN assetbusinessunits bu ON p.businessunitid = bu.id
+                WHERE f.id = $1
             `);
 
         if (hierarchyResult.recordset.length === 0) {
@@ -972,7 +973,7 @@ router.post('/folders/:folderId/files/bulk', authenticateToken, authorizeAssetPe
                     .input('FileSize', sql.BigInt, fileSize)
                     .input('StoragePath', sql.NVarChar, finalStoragePath)
                     .input('Description', sql.NVarChar, description || null)
-                    .input('IsArchived', sql.Bit, isArchived ? 1 : 0)
+                    .input('IsArchived', sql.Bit, isArchived === true || isArchived === 'true')
                     .input('AudienceLevel', sql.NVarChar, selectedAudienceLevel)
                     .input('CreatedBy', sql.Int, req.user.id)
                     .query(`
@@ -1042,7 +1043,7 @@ router.put('/files/:id', authenticateToken, authorizeAssetPermission('ASSET_FILE
             .input('Id', sql.Int, id)
             .input('Title', sql.NVarChar, title)
             .input('Description', sql.NVarChar, description || null)
-            .input('IsArchived', sql.Bit, isArchived === true || isArchived === 'true' ? 1 : 0)
+            .input('IsArchived', sql.Bit, isArchived === true || isArchived === 'true')
             .input('AudienceLevel', sql.NVarChar, audienceLevel || 'Internal')
             .input('UpdatedBy', sql.Int, req.user.id)
             .query(`

@@ -52,7 +52,7 @@ export const ChangePassword: React.FC<ChangePasswordProps> = ({ user, onSuccess 
                             className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
                             value={newPassword}
                             onChange={(e) => setNewPassword(e.target.value)}
-                            minLength={6}
+                            minLength={8}
                         />
                     </div>
                     <div>
@@ -63,7 +63,7 @@ export const ChangePassword: React.FC<ChangePasswordProps> = ({ user, onSuccess 
                             className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
                             value={confirmPassword}
                             onChange={(e) => setConfirmPassword(e.target.value)}
-                            minLength={6}
+                            minLength={8}
                         />
                     </div>
                     <button

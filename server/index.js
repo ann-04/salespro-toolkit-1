@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { connectToDatabase, sql } from './db-postgres-compat.js';
@@ -30,7 +31,10 @@ import {
     securityHeaders,
     errorHandler,
     requirePermission,
-    requireRole
+    requireRole,
+    rateLimiter,
+    hppMiddleware,
+    authRateLimiter
 } from './middleware/security.js';
 import {
     isValidEmail,
@@ -78,6 +82,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // CORS Configuration - restrict to allowed origins
+// MUST be first so OPTIONS preflight requests are handled before any other middleware
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173'];
 app.use(cors({
     origin: (origin, callback) => {
@@ -93,7 +98,25 @@ app.use(cors({
     credentials: true
 }));
 
-app.use(express.json());
+// --- Core Security Middleware ---
+// Helmet configured for API server use:
+// - contentSecurityPolicy: false — CSP is for HTML pages, not JSON APIs
+// - crossOriginResourcePolicy: false — API is intentionally consumed cross-origin by the frontend
+const helmetMiddleware = helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: false,
+});
+
+// 1. Helmet sets comprehensive secure HTTP headers (configured for API use)
+app.use(helmetMiddleware);
+
+// 2. HTTP Parameter Pollution prevention
+app.use(hppMiddleware);
+
+// 3. Global rate limiter: 100 req per 15 min per IP
+app.use(rateLimiter);
+
+app.use(express.json({ limit: '10kb' })); // Limit request body size to prevent payload attacks
 app.use(securityHeaders);
 
 // Sales Assets Routes
@@ -102,9 +125,10 @@ app.use('/api/assets', salesAssetsRoutes);
 // --- MIDDLEWARE ---
 // authenticateToken is now imported from security middleware
 
-// --- Mock Email Service ---
+// --- Mock Email Service (development only) ---
 const sendCredentialsEmail = async (email, password) => {
-    console.log(`
+    if (process.env.NODE_ENV !== 'production') {
+        console.log(`
     =================================================
     📧 MOCK EMAIL SENT TO: ${email}
     -------------------------------------------------
@@ -125,11 +149,14 @@ const sendCredentialsEmail = async (email, password) => {
     SalesPro Admin Team
     =================================================
     `);
-    // In real app: await transporter.sendMail(...)
+    }
+    // TODO: In production, use a real email service (e.g. SendGrid, SES):
+    // await emailService.sendCredentials(email, password);
 };
 
 const sendRequestReceivedEmail = async (email) => {
-    console.log(`
+    if (process.env.NODE_ENV !== 'production') {
+        console.log(`
     =================================================
     📧 MOCK EMAIL SENT TO: ${email}
     -------------------------------------------------
@@ -140,6 +167,8 @@ const sendRequestReceivedEmail = async (email) => {
     We have received your request. An admin will review it shortly.
     =================================================
     `);
+    }
+    // TODO: In production, use a real email service.
 };
 
 // Root route to check if server is running
@@ -188,8 +217,8 @@ app.post('/api/auth/register', async (req, res) => {
             .input('BusinessUnitId', sql.Int, buId || null)
             .input('UserType', sql.NVarChar, sanitizedUserType)
             .query(`
-                INSERT INTO Users (Name, Email, Status, UserType)
-                VALUES (@Name, @Email, 'PENDING', @UserType)
+                INSERT INTO Users (Name, Email, PasswordHash, Status, UserType, RoleId, BusinessUnitId)
+                VALUES (@Name, @Email, NULL, 'PENDING', @UserType, @RoleId, @BusinessUnitId)
             `);
 
         await sendRequestReceivedEmail(email);
@@ -218,13 +247,13 @@ app.post('/api/admin/users/:id/approve', authenticateToken, requirePermission('U
         const tempPassword = crypto.randomBytes(4).toString('hex'); // e.g. 'a1b2c3d4'
         const hash = await bcrypt.hash(tempPassword, 10);
 
-        // Update User
+        // Update User — set MustChangePassword=TRUE so the user is forced to change on first login
         await pool.request()
             .input('Id', sql.Int, id)
             .input('Hash', sql.NVarChar, hash)
             .query(`
                 UPDATE Users 
-                SET Status = 'APPROVED', PasswordHash = @Hash
+                SET Status = 'APPROVED', PasswordHash = @Hash, "MustChangePassword" = TRUE
                 WHERE Id = @Id
             `);
 
@@ -272,7 +301,7 @@ app.put('/api/admin/users/:id', authenticateToken, requirePermission('USERS_MANA
         }
 
         if (partnerCategory !== undefined && partnerCategory !== null && !isValidPartnerCategory(partnerCategory)) {
-            return res.status(400).json({ error: 'Invalid partner category. Must be Bronze, Silver, or Gold' });
+            return res.status(400).json({ error: 'Invalid partner category' });
         }
 
         const pool = await connectToDatabase();
@@ -335,7 +364,8 @@ app.get('/api/admin/users', authenticateToken, requirePermission('USERS_VIEW'), 
 // --- AUTH ROUTES ---
 
 // 1. LOGIN (Updated for Permissions)
-app.post('/api/auth/login', async (req, res) => {
+// authRateLimiter: strict 10 attempts per IP per 15 minutes to prevent brute-force
+app.post('/api/auth/login', authRateLimiter, async (req, res) => {
     try {
         const { email, password } = req.body;
         const pool = await connectToDatabase();
@@ -347,7 +377,7 @@ app.post('/api/auth/login', async (req, res) => {
             .query(`
                 SELECT 
                     u.Id, u.Name, u.Email, u.PasswordHash, u.Status, 
-                    u.UserType, u.PartnerCategory, 
+                    u.UserType, u.PartnerCategory, u.MustChangePassword,
                     u.RoleId, u.BusinessUnitId, u.CreatedAt, u.LastLogin,
                     r.Name as RoleName, 
                     b.Name as BuName
@@ -368,6 +398,8 @@ app.post('/api/auth/login', async (req, res) => {
 
         await pool.request().input('Id', sql.Int, user.Id).query('UPDATE Users SET LastLogin = GETDATE() WHERE Id = @Id');
         await logAudit(pool, user.Id, 'LOGIN', 'User', user.Id, { role: user.RoleName });
+
+        const mustChangePassword = user.MustChangePassword === true || user.MustChangePassword === 't' || user.MustChangePassword === 1;
 
         // FETCH PERMISSIONS
         const permResult = await pool.request()
@@ -390,7 +422,7 @@ app.post('/api/auth/login', async (req, res) => {
             userType: user.UserType || 'INTERNAL',
             partnerCategory: user.PartnerCategory,
             permissions: permissions,
-            mustChangePassword: false
+            mustChangePassword: mustChangePassword
         });
 
         res.json({
@@ -399,7 +431,7 @@ app.post('/api/auth/login', async (req, res) => {
                 id: user.Id,
                 name: user.Name,
                 email: user.Email,
-                mustChangePassword: false,
+                mustChangePassword: mustChangePassword,
                 role: user.RoleName,
                 bu: user.BuName,
                 userType: user.UserType || 'INTERNAL',
@@ -410,7 +442,12 @@ app.post('/api/auth/login', async (req, res) => {
 
     } catch (err) {
         console.error('Login Error:', err);
-        res.status(500).json({ error: 'Login failed' });
+        res.status(500).json({
+            error: 'Login failed',
+            detail: err.message,
+            hint: err.hint,
+            code: err.code
+        });
     }
 });
 
@@ -466,8 +503,8 @@ app.post('/api/users', authenticateToken, requirePermission('USERS_CREATE'), asy
             .input('UserType', sql.NVarChar, sanitizedUserType)
             .input('PartnerCategory', sql.NVarChar, partnerCategory || null)
             .query(`
-                INSERT INTO Users (Name, Email, PasswordHash, Status, RoleId, BusinessUnitId, UserType, PartnerCategory)
-                VALUES (@Name, @Email, @Hash, 'APPROVED', @RoleId, @BuId, @UserType, @PartnerCategory)
+                INSERT INTO Users (Name, Email, PasswordHash, Status, RoleId, BusinessUnitId, UserType, PartnerCategory, "MustChangePassword")
+                VALUES (@Name, @Email, @Hash, 'APPROVED', @RoleId, @BuId, @UserType, @PartnerCategory, TRUE)
             `);
 
         await sendCredentialsEmail(email, tempPassword);
@@ -499,7 +536,7 @@ app.post('/api/auth/change-password', async (req, res) => {
             .input('Hash', sql.NVarChar, hash)
             .query(`
                 UPDATE Users 
-                SET PasswordHash = @Hash
+                SET PasswordHash = @Hash, "MustChangePassword" = FALSE
                 WHERE Id = @Id
             `);
 
@@ -512,7 +549,7 @@ app.post('/api/auth/change-password', async (req, res) => {
 });
 
 // GET Business Units
-app.get('/api/admin/business-units', authenticateToken, requirePermission('BU_VIEW'), async (req, res) => {
+app.get('/api/admin/business-units', authenticateToken, requirePermission('DEPARTMENTS_MANAGE'), async (req, res) => {
     try {
         const pool = await connectToDatabase();
         const result = await pool.request().query('SELECT * FROM BusinessUnits');
@@ -523,7 +560,7 @@ app.get('/api/admin/business-units', authenticateToken, requirePermission('BU_VI
 });
 
 // CREATE Business Unit
-app.post('/api/admin/business-units', authenticateToken, requirePermission('BU_MANAGE'), async (req, res) => {
+app.post('/api/admin/business-units', authenticateToken, requirePermission('DEPARTMENTS_MANAGE'), async (req, res) => {
     try {
         const { name } = req.body;
 
@@ -545,7 +582,7 @@ app.post('/api/admin/business-units', authenticateToken, requirePermission('BU_M
     }
 });
 // CREATE BU (legacy route - delegates to main route logic)
-app.post('/api/admin/bus', authenticateToken, requirePermission('BU_MANAGE'), async (req, res) => {
+app.post('/api/admin/bus', authenticateToken, requirePermission('DEPARTMENTS_MANAGE'), async (req, res) => {
     try {
         const { name } = req.body;
         if (!name || name.trim().length < 2) {
@@ -564,7 +601,7 @@ app.post('/api/admin/bus', authenticateToken, requirePermission('BU_MANAGE'), as
 });
 
 // EDIT BU
-app.put('/api/admin/bus/:id', authenticateToken, requirePermission('BU_MANAGE'), async (req, res) => {
+app.put('/api/admin/bus/:id', authenticateToken, requirePermission('DEPARTMENTS_MANAGE'), async (req, res) => {
     try {
         const { id } = req.params;
         const { name } = req.body;
@@ -593,7 +630,7 @@ app.put('/api/admin/bus/:id', authenticateToken, requirePermission('BU_MANAGE'),
 });
 
 // DELETE BU
-app.delete('/api/admin/bus/:id', authenticateToken, requirePermission('BU_MANAGE'), async (req, res) => {
+app.delete('/api/admin/bus/:id', authenticateToken, requirePermission('DEPARTMENTS_MANAGE'), async (req, res) => {
     try {
         const { id } = req.params;
 
@@ -612,7 +649,7 @@ app.delete('/api/admin/bus/:id', authenticateToken, requirePermission('BU_MANAGE
 });
 
 // GET Roles
-app.get('/api/admin/roles', authenticateToken, requirePermission('ROLES_VIEW'), async (req, res) => {
+app.get('/api/admin/roles', authenticateToken, requirePermission('ROLES_MANAGE'), async (req, res) => {
     try {
         const pool = await connectToDatabase();
         const result = await pool.request().query('SELECT * FROM Roles');
@@ -835,7 +872,7 @@ app.put('/api/admin/users/:id/role-bu', authenticateToken, requirePermission('US
 });
 
 // DELETE USER
-app.delete('/api/admin/users/:id', authenticateToken, requirePermission('USERS_DELETE'), async (req, res) => {
+app.delete('/api/admin/users/:id', authenticateToken, requirePermission('USERS_MANAGE'), async (req, res) => {
     try {
         const { id } = req.params;
 

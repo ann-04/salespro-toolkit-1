@@ -90,7 +90,7 @@ export const Register: React.FC<RegisterProps> = ({ onSwitchToLogin }) => {
                             className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
                             value={name}
                             onChange={(e) => setName(e.target.value)}
-                            placeholder="Ann Varghese"
+                            placeholder="Your full name"
                         />
                     </div>
                     <div>

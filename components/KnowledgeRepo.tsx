@@ -253,14 +253,13 @@ const KnowledgeRepo: React.FC<KnowledgeRepoProps> = ({ user }) => {
           </div>
           <div>
             <label className="block text-xs font-bold text-slate-500 uppercase">Category</label>
-            <select
+            <input
+              type="text"
               className="w-full p-2 border rounded"
               value={editForm.category}
               onChange={e => setEditForm({ ...editForm, category: e.target.value })}
-            >
-              <option value="">Select Category</option>
-              {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-            </select>
+              placeholder="Enter category (e.g. Cloud, Security)"
+            />
           </div>
         </div >
       )}

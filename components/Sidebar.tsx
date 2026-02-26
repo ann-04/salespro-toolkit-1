@@ -45,7 +45,15 @@ const Sidebar: React.FC<SidebarProps> = ({ activePillar, onSelect, isOpen, onClo
         {items.map((item) => {
           if (item.id === Pillar.ADMIN) {
             const allowedRoles = ['Admin', 'Sales Manager', 'Product Manager'];
-            if (!user?.role || !allowedRoles.includes(user.role)) return null;
+            const governancePerms = [
+              'USERS_VIEW', 'USERS_CREATE', 'USERS_MANAGE', 'USERS_APPROVE',
+              'DEPARTMENTS_VIEW', 'DEPARTMENTS_CREATE', 'DEPARTMENTS_MANAGE',
+              'ROLES_UPDATE', 'ROLES_CREATE', 'ROLES_DELETE',
+              'PRODUCTS_CREATE', 'PRODUCTS_UPDATE', 'PRODUCTS_DELETE',
+              'AUDIT_DELETE', 'CATEGORIES_MANAGE',
+            ];
+            const hasGovPerm = user?.permissions?.some((p: string) => governancePerms.includes(p));
+            if (!allowedRoles.includes(user?.role || '') && !hasGovPerm) return null;
           }
           return (
             <button

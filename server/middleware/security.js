@@ -1,12 +1,16 @@
 /**
  * Security Middleware
- * Implements JWT security best practices and input validation
+ * Implements JWT security best practices, input validation,
+ * HTTP header protection, rate limiting, and parameter pollution protection.
  */
 
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import helmet from 'helmet'; // New import for HTTP header security
+import rateLimit from 'express-rate-limit'; // New import for rate limiting
+import hpp from 'hpp'; // New import for HTTP Parameter Pollution protection
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -192,7 +196,8 @@ export const requireRole = (role) => {
 };
 
 /**
- * Middleware: Security headers
+ * Middleware: Security headers (using Helmet for comprehensive protection)
+ * Note: Some headers might be redundant if Helmet is used, but kept for explicit configuration.
  */
 export const securityHeaders = (req, res, next) => {
     // Prevent clickjacking
@@ -209,6 +214,44 @@ export const securityHeaders = (req, res, next) => {
 
     next();
 };
+
+/**
+ * Middleware: Helmet for setting various HTTP headers for security.
+ * This should be applied early in your middleware stack.
+ */
+export const helmetMiddleware = helmet();
+
+/**
+ * Middleware: Rate Limiting to prevent brute-force attacks and abuse.
+ * Limits each IP to 100 requests per 15 minutes.
+ */
+export const rateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Limit each IP to 100 requests per windowMs
+    message: 'Too many requests from this IP, please try again after 15 minutes',
+    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+});
+
+/**
+ * Middleware: HTTP Parameter Pollution (HPP) protection.
+ * Prevents parameter pollution attacks by only allowing the first parameter value.
+ */
+export const hppMiddleware = hpp();
+
+/**
+ * Middleware: Strict rate limiter for authentication endpoints.
+ * Much tighter limits to prevent brute-force login attacks.
+ * Allows only 10 attempts per IP per 15 minutes.
+ */
+export const authRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // Limit each IP to 10 login attempts
+    message: 'Too many login attempts from this IP. Please try again after 15 minutes.',
+    standardHeaders: true,
+    legacyHeaders: false,
+    skipSuccessfulRequests: true, // Don't count successful logins against the limit
+});
 
 /**
  * Middleware: Error handler (production-safe)

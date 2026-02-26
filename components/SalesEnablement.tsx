@@ -1,20 +1,12 @@
 
-import React, { useState, useEffect } from 'react';
-import { DataService } from '../services/api';
-import { ICP, Persona } from '../types';
+import React from 'react';
+import { SECLORE_ICP, PERSONAS, OBJECTIONS } from '../data';
 
 const SalesEnablement: React.FC = () => {
-  const [icp, setIcp] = useState<ICP | null>(null);
-  const [personas, setPersonas] = useState<Persona[]>([]);
-  const [objections, setObjections] = useState<any[]>([]);
+  const icp = SECLORE_ICP;
+  const personas = PERSONAS;
+  const objections = OBJECTIONS;
 
-  useEffect(() => {
-    DataService.getICP().then(setIcp).catch(console.error);
-    DataService.getPersonas().then(setPersonas).catch(console.error);
-    DataService.getObjections().then(setObjections).catch(console.error);
-  }, []);
-
-  if (!icp) return <div className="p-8 text-center text-slate-500">Loading enablement data...</div>;
   return (
     <div className="space-y-12">
       <header>

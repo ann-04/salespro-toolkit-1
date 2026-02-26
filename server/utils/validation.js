@@ -62,11 +62,11 @@ export function isValidUserType(userType) {
 
 /**
  * Validate partner category
+ * Categories are now DB-driven (admin-managed), so accept any non-empty string
  */
 export function isValidPartnerCategory(category) {
     if (!category) return true; // Optional field
-    const validCategories = ['BRONZE', 'SILVER', 'GOLD'];
-    return validCategories.includes(category?.toUpperCase());
+    return typeof category === 'string' && category.trim().length > 0;
 }
 
 /**

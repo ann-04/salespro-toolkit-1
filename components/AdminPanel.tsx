@@ -27,7 +27,7 @@ interface AdminPanelProps {
 }
 
 const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
-  const [activeTab, setActiveTab] = useState<'overview' | 'products' | 'users' | 'org' | 'categories' | 'audit' | 'system' | 'assetPerms'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'products' | 'users' | 'org' | 'categories' | 'audit' | 'system'>('overview');
 
   // System Config State
   const [systemConfig, setSystemConfig] = useState({ apiKey: '', modelName: '' });
@@ -89,7 +89,12 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
   const fetchPartnerCategories = async () => {
     try {
       const data = await DataService.getPartnerCategories();
-      setPartnerCategories(data);
+      // Normalize keys: compat layer may return PascalCase (Id, Name) instead of lowercase
+      const normalized = data.map((c: any) => ({
+        id: c.id ?? c.Id,
+        name: c.name ?? c.Name,
+      }));
+      setPartnerCategories(normalized);
     } catch (err) { console.error('Failed to load partner categories', err); }
   };
 
@@ -218,10 +223,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
 
-  // Asset Permissions State
-  const [allAssetPermissions, setAllAssetPermissions] = useState<any[]>([]);
-  const [managingAssetUser, setManagingAssetUser] = useState<AdminUser | null>(null);
-  const [selectedAssetPermIds, setSelectedAssetPermIds] = useState<Set<number>>(new Set());
+
 
   const fetchAuditLogs = async () => {
     try {
@@ -248,56 +250,9 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
       fetchAuditLogs();
     } else if (activeTab === 'system') {
       fetchSystemConfig();
-    } else if (activeTab === 'assetPerms') {
-      fetchDataForUsers();
-      fetchAssetPermissions();
     }
   }, [activeTab]);
 
-  const fetchAssetPermissions = async () => {
-    try {
-      const res = await fetch(`${API_URL}/assets/admin/asset-permissions`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setAllAssetPermissions(data);
-      }
-    } catch (err) { console.error('Failed to load asset permissions', err); }
-  };
-
-  const openAssetPermissionModal = async (user: AdminUser) => {
-    try {
-      const res = await fetch(`${API_URL}/assets/admin/users/${user.id}/asset-permissions`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-      });
-      if (res.ok) {
-        const userPerms = await res.json();
-        setSelectedAssetPermIds(new Set(userPerms.map((p: any) => p.Id)));
-        setManagingAssetUser(user);
-      }
-    } catch (err: any) { alert('Failed to load user asset permissions: ' + err.message); }
-  };
-
-  const saveAssetPermissions = async () => {
-    if (!managingAssetUser) return;
-    try {
-      const res = await fetch(`${API_URL}/assets/admin/users/${managingAssetUser.id}/asset-permissions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
-        body: JSON.stringify({ permissionIds: Array.from(selectedAssetPermIds) })
-      });
-      if (res.ok) {
-        setManagingAssetUser(null);
-        alert('Asset permissions updated successfully');
-      } else {
-        alert('Failed to save asset permissions');
-      }
-    } catch (err) { alert('Error saving asset permissions'); }
-  };
 
   const fetchSystemConfig = async () => {
     try {
@@ -357,18 +312,17 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
   const fetchDataForUsers = async () => {
     setLoading(true);
     try {
-      const [usersData, rolesData, busData] = await Promise.all([
+      const [usersResult, rolesResult, busResult] = await Promise.allSettled([
         DataService.getUsers(),
         DataService.getRoles(),
         DataService.getBusinessUnits()
       ]);
-      setUsers(usersData);
-      setRoles(rolesData);
-      setBus(busData);
+      if (usersResult.status === 'fulfilled') setUsers(usersResult.value);
+      if (rolesResult.status === 'fulfilled') setRoles(rolesResult.value);
+      if (busResult.status === 'fulfilled') setBus(busResult.value);
       setError(null);
     } catch (err) {
       console.error(err);
-      setError('Failed to load user management data.');
     } finally {
       setLoading(false);
     }
@@ -512,7 +466,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
           >
             Manage Products
           </button>
-          {(can('USERS_CREATE') || can('USERS_UPDATE') || can('USERS_APPROVE')) && (
+          {(can('USERS_CREATE') || can('USERS_MANAGE')) && (
             <button
               onClick={() => setActiveTab('users')}
               className={`px-4 py-2 rounded-md text-sm font-medium transition ${activeTab === 'users' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}
@@ -521,7 +475,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
             </button>
           )}
 
-          {(can('ROLES_UPDATE') || can('ROLES_CREATE') || can('ROLES_DELETE') || can('DEPARTMENTS_VIEW') || can('DEPARTMENTS_MANAGE') || can('CATEGORIES_MANAGE')) && (
+          {(can('ROLES_MANAGE') || can('DEPARTMENTS_MANAGE') || can('CATEGORIES_MANAGE')) && (
             <button
               onClick={() => setActiveTab('org')}
               className={`px-4 py-2 rounded-md text-sm font-medium transition ${activeTab === 'org' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}
@@ -539,14 +493,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
             </button>
           )}
 
-          {(user?.role === 'Admin' || user?.roleName === 'Admin') && (
-            <button
-              onClick={() => setActiveTab('assetPerms')}
-              className={`px-4 py-2 rounded-md text-sm font-medium transition ${activeTab === 'assetPerms' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}
-            >
-              Asset Permissions
-            </button>
-          )}
+
 
         </div>
       </header>
@@ -607,7 +554,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
                   <p className="text-xs text-slate-500">{product.category}</p>
                 </div>
                 <div className="flex space-x-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                  {can('PRODUCTS_UPDATE') && (
+                  {can('PRODUCTS_MANAGE') && (
                     <button
                       onClick={(e) => startEdit(e, product)}
                       className="px-3 py-1 text-xs font-bold text-indigo-600 bg-indigo-50 rounded hover:bg-indigo-100 transition"
@@ -615,7 +562,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
                       Edit
                     </button>
                   )}
-                  {can('PRODUCTS_DELETE') && (
+                  {can('PRODUCTS_MANAGE') && (
                     <button
                       onClick={(e) => handleDelete(e, product.id!)}
                       className="px-3 py-1 text-xs font-bold text-red-600 bg-red-50 rounded hover:bg-red-100 transition"
@@ -630,7 +577,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
           </div>
 
           <div className="p-6 border-t border-slate-200 bg-slate-50">
-            {can('PRODUCTS_CREATE') && (
+            {can('PRODUCTS_MANAGE') && (
               <button
                 onClick={() => {
                   setIsFormOpen(true);
@@ -706,14 +653,16 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
                           Approve
                         </button>
                       )}
-                      <button
-                        onClick={() => {
-                          if (confirm(`Delete user ${u.name}?`)) deleteUser(u.id);
-                        }}
-                        className="px-3 py-1 text-xs font-bold text-red-600 bg-red-50 rounded hover:bg-red-100 transition"
-                      >
-                        Delete
-                      </button>
+                      {can('USERS_MANAGE') && (
+                        <button
+                          onClick={() => {
+                            if (confirm(`Delete user ${u.name}?`)) deleteUser(u.id);
+                          }}
+                          className="px-3 py-1 text-xs font-bold text-red-600 bg-red-50 rounded hover:bg-red-100 transition"
+                        >
+                          Delete
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -903,7 +852,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
       {
         activeTab === 'org' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            {(can('ROLES_CREATE') || can('ROLES_UPDATE') || can('ROLES_DELETE')) && (
+            {can('ROLES_MANAGE') && (
               <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
                 <h3 className="text-xl font-bold mb-4">Roles & Positions</h3>
 
@@ -922,7 +871,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
                         )}
                         {r.Name !== 'Admin' && (
                           <>
-                            {can('ROLES_UPDATE') && (
+                            {can('ROLES_MANAGE') && (
                               <button
                                 onClick={async () => {
                                   const newName = prompt('Rename Role:', r.Name);
@@ -938,7 +887,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
                                 Edit
                               </button>
                             )}
-                            {can('ROLES_DELETE') && (
+                            {can('ROLES_MANAGE') && (
                               <button
                                 onClick={async () => {
                                   if (confirm('Delete Role? This might break users assigned to it.')) {
@@ -960,7 +909,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
                   ))}
                 </div>
 
-                {can('ROLES_CREATE') && (
+                {can('ROLES_MANAGE') && (
                   <div className="flex space-x-2">
                     <input
                       type="text"
@@ -1365,106 +1314,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user }) => {
         )
       }
 
-      {/* Asset Permissions Tab */}
-      {activeTab === 'assetPerms' && (
-        <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="p-6 border-b border-slate-200">
-            <h3 className="text-xl font-bold">Asset Permissions Management</h3>
-            <p className="text-sm text-slate-500 mt-1">
-              Manage user permissions for creating, updating, and deleting assets. All users can view assets by default.
-            </p>
-          </div>
 
-          {loading ? (
-            <div className="p-12 text-center text-slate-500">Loading users...</div>
-          ) : (
-            <div className="space-y-3 mb-6 p-6">
-              {users.map(u => (
-                <div key={u.id} className="flex items-center justify-between p-4 bg-slate-50 border border-slate-100 rounded-lg group hover:border-blue-200 transition bg-white shadow-sm">
-                  <div className="flex-1">
-                    <p className="font-bold text-slate-900">{u.name}</p>
-                    <p className="text-xs text-slate-500">{u.email}</p>
-                    <div className="mt-1 text-xs text-slate-600">
-                      {u.roleName || 'No Role'} • {u.buName || 'No Dept'}
-                    </div>
-                  </div>
-
-                  <div className="flex space-x-2 opacity-0 group-hover:opacity-100 transition-opacity ml-4">
-                    <button
-                      onClick={() => openAssetPermissionModal(u)}
-                      className="px-3 py-1 text-xs font-bold text-teal-600 bg-teal-50 rounded hover:bg-teal-100 transition"
-                    >
-                      Manage Asset Permissions
-                    </button>
-                  </div>
-                </div>
-              ))}
-              {users.length === 0 && <p className="text-slate-500 italic p-4">No users found.</p>}
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* Asset Permission Modal */}
-      {managingAssetUser && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-xl font-bold mb-2">Manage Asset Permissions: {managingAssetUser.name}</h3>
-            <p className="text-sm text-slate-500 mb-4">
-              Select which asset operations this user can perform. View access is granted to all users by default.
-            </p>
-
-            <div className="space-y-6">
-              {Object.entries(allAssetPermissions
-                .filter(p => p.Action !== 'READ') // Exclude READ since all users can view
-                .reduce((acc: any, p) => {
-                  if (!acc[p.ResourceType]) acc[p.ResourceType] = [];
-                  acc[p.ResourceType].push(p);
-                  return acc;
-                }, {})).map(([resourceType, perms]: [string, any]) => (
-                  <div key={resourceType} className="border border-slate-200 rounded-lg p-4 bg-slate-50">
-                    <h4 className="font-bold text-slate-700 mb-3 border-b border-slate-200 pb-2">
-                      {resourceType.replace('_', ' ')}
-                    </h4>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      {perms.map((p: any) => (
-                        <label key={p.Id} className="flex items-center space-x-2 cursor-pointer hover:bg-slate-100 p-2 rounded">
-                          <input
-                            type="checkbox"
-                            checked={selectedAssetPermIds.has(p.Id)}
-                            onChange={e => {
-                              const newSet = new Set(selectedAssetPermIds);
-                              if (e.target.checked) newSet.add(p.Id);
-                              else newSet.delete(p.Id);
-                              setSelectedAssetPermIds(newSet);
-                            }}
-                            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                          />
-                          <span className="text-sm text-slate-700">{p.Action}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-            </div>
-
-            <div className="flex justify-end space-x-3 mt-6 border-t pt-4">
-              <button
-                onClick={() => setManagingAssetUser(null)}
-                className="px-4 py-2 border border-slate-200 rounded-lg text-slate-700 hover:bg-slate-50 transition"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={saveAssetPermissions}
-                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-bold"
-              >
-                Save Permissions
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div >
   );
 };
